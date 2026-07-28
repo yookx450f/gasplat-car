@@ -1,0 +1,371 @@
+#!/usr/bin/env python3
+"""
+Gaussian Splatting訓練モジュール
+
+COLMAPで推定したカメラパラメータと画像から、3Dガウシアン分布を最適化する。
+"""
+
+import os
+import sys
+import json
+import numpy as np
+import torch
+from pathlib import Path
+from typing import Dict, List, Tuple, Optional
+from dataclasses import dataclass, field
+
+# gsplat関連のインポート
+try:
+    from gsplat import rasterization, project_gaussians, get_world_to_image_transform
+    from gsplat import rendering
+    from gsplat import project_gaussians_sdf
+except ImportError:
+    print("警告: gsplatがインストールされていません。pip install gsplat を実行してください。")
+
+# 画像処理
+from PIL import Image
+
+
+@dataclass
+class TrainingConfig:
+    """訓練設定"""
+    num_iterations: int = 30000
+    seed: int = 42
+    learning_rate: float = 0.01
+    optimizer: dict = field(default_factory=lambda: {
+        'type': 'adam',
+        'beta1': 0.9,
+        'beta2': 0.999,
+        'epsilon': 1e-15
+    })
+
+
+@dataclass
+class GaussianData:
+    """Gaussian Splattingの3Dデータ"""
+    means: np.ndarray = None           # 位置 (N, 3)
+    quats: np.ndarray = None           # 回転（クォータニオン） (N, 4)
+    scales: np.ndarray = None          # スケール (N, 3)
+    opacities: np.ndarray = None       # 不透明度 (N,)
+    colors: np.ndarray = None          # 色 (N, 3)
+    camera_params: List[Dict] = None   # カメラパラメータ
+    image_paths: List[str] = None      # 画像パス
+
+
+class GaussianSplattingTrainer:
+    """Gaussian Splatting訓練クラス"""
+    
+    def __init__(self, config: dict):
+        """
+        Parameters
+        ----------
+        config : dict
+            設定ファイル
+        """
+        self.config = config
+        self.training_config = TrainingConfig(**config.get('training', {}))
+        
+        # 乱数シードの設定
+        torch.manual_seed(self.training_config.seed)
+        np.random.seed(self.training_config.seed)
+        
+        # GPUの確認
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        print(f"使用デバイス: {self.device}")
+        
+        if not torch.cuda.is_available():
+            print("警告: GPUが検出されません。訓練が遅くなります。")
+        
+        # 出力ディレクトリ
+        self.output_dir = Path(config['output']['dir']) / 'gsplat'
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+    
+    def _load_images(self, image_paths: List[str]) -> List[torch.Tensor]:
+        """画像を読み込み、テンソルに変換"""
+        images = []
+        for img_path in image_paths:
+            img = Image.open(img_path).convert('RGB')
+            img_tensor = torch.tensor(np.array(img), dtype=torch.float32, device=self.device)
+            img_tensor = img_tensor.permute(2, 0, 1) / 255.0  # (C, H, W)
+            images.append(img_tensor)
+        return images
+    
+    def _initialize_gaussians(self, colmap_results: Dict, num_gaussians: int = 100000) -> Dict:
+        """
+        ガウシアンを初期化
+        
+        COLMAPの3Dポイントから初期位置を抽出し、スケールと回転を適応的に設定する。
+        
+        Parameters
+        ----------
+        colmap_results : dict
+            COLMAP処理結果
+        num_gaussians : int
+            初期化するガウシアン数
+        
+        Returns
+        -------
+        dict
+            初期化されたGaussianデータ
+        """
+        points3D = colmap_results.get('points3D')
+        
+        if points3D is None or len(points3D) == 0:
+            print("警告: 3Dポイントが見つかりません。ランダム初期化を使用します。")
+            # ランダム初期化
+            means = np.random.uniform(-5, 5, (num_gaussians, 3))
+        else:
+            # 3Dポイントをサンプリング
+            if len(points3D) > num_gaussians:
+                indices = np.random.choice(len(points3D), num_gaussians, replace=False)
+                sampled_points = points3D[indices]
+            else:
+                sampled_points = points3D
+            
+            means = sampled_points[:, :3]
+            colors = sampled_points[:, 3:6] / 255.0
+            
+            # ガウシアン数を調整
+            num_gaussians = len(means)
+        
+        # スケールを計算（近傍ポイントに基づいて）
+        if len(means) > 1:
+            dists = np.linalg.norm(means[1:] - means[:-1], axis=1)
+            median_dist = np.median(dists) if len(dists) > 0 else 0.1
+            scales = np.log(np.full((num_gaussians, 3), max(median_dist * 0.1, 0.01)))
+        else:
+            scales = np.log(np.full((num_gaussians, 3), 0.1))
+        
+        # 回転（クォータニオン）- 初期値はアイデンティティ
+        quats = np.zeros((num_gaussians, 4))
+        quats[:, 0] = 1.0  # qw = 1, qx = qy = qz = 0
+        
+        # 不透明度
+        opacities = np.log(np.exp(np.full(num_gaussians, -1)))  # 初期値は中程度
+        
+        gaussian_data = {
+            'means': means.astype(np.float32),
+            'quats': quats.astype(np.float32),
+            'scales': scales.astype(np.float32),
+            'opacities': opacities.astype(np.float32),
+            'colors': colors.astype(np.float32) if colors is not None else np.random.rand(num_gaussians, 3).astype(np.float32)
+        }
+        
+        return gaussian_data
+    
+    def _prepare_camera_matrices(self, colmap_results: Dict) -> Tuple[torch.Tensor, torch.Tensor, Tuple[int, int]]:
+        """
+        カメラ行列を準備
+        
+        Parameters
+        ----------
+        colmap_results : dict
+            COLMAP処理結果
+        
+        Returns
+        -------
+        tuple
+            カメラ行列、変換行列、画像サイズ
+        """
+        images = colmap_results.get('images', {})
+        cameras = colmap_results.get('cameras', {})
+        
+        camera_matrices = []
+        image_sizes = []
+        
+        for cam_id, cam_data in images.items():
+            if cam_id not in cameras:
+                continue
+            
+            cam_params = cameras[cam_id]
+            R = cam_data['rotation']
+            t = cam_data['translation']
+            
+            # カメラ行列を構築
+            if 'fx' in cam_params:
+                fx = cam_params['fx']
+                fy = cam_params.get('fx', fx)  # simple_pinhoneの場合
+                cx = cam_params['cx']
+                cy = cam_params['cy']
+                width = cam_params['width']
+                height = cam_params['height']
+                
+                K = np.array([
+                    [fx, 0, cx],
+                    [0, fy, cy],
+                    [0, 0, 1]
+                ], dtype=np.float32)
+            else:
+                # デフォルト値
+                width = 1024
+                height = 1024
+                K = np.array([
+                    [width * 1.2, 0, width / 2],
+                    [0, height * 1.2, height / 2],
+                    [0, 0, 1]
+                ], dtype=np.float32)
+            
+            # 外部行列: R|t
+            RT = np.hstack([R, t.reshape(3, 1)])  # (3, 4)
+            P = K @ RT  # (3, 4)
+            
+            camera_matrices.append({
+                'K': torch.tensor(K, device=self.device),
+                'RT': torch.tensor(RT, device=self.device),
+                'width': width,
+                'height': height,
+                'image_size': (height, width)
+            })
+            
+            image_sizes = (height, width)
+        
+        return camera_matrices, image_sizes
+    
+    def train(self, colmap_results: Dict) -> GaussianData:
+        """
+        Gaussian Splattingの訓練を実行
+        
+        Parameters
+        ----------
+        colmap_results : dict
+            COLMAP処理結果
+        
+        Returns
+        -------
+        GaussianData
+            訓練されたGaussianデータ
+        """
+        print("画像を読み込み中...")
+        image_paths = colmap_results['image_paths']
+        images = self._load_images(image_paths)
+        
+        print("カメラ行列を準備中...")
+        camera_matrices, image_size = self._prepare_camera_matrices(colmap_results)
+        
+        print("ガウシアンを初期化中...")
+        gaussian_init = self._initialize_gaussians(colmap_results)
+        
+        # PyTorchテンソルに変換
+        means = torch.tensor(gaussian_init['means'], dtype=torch.float32, device=self.device)
+        quats = torch.tensor(gaussian_init['quats'], dtype=torch.float32, device=self.device)
+        scales = torch.tensor(gaussian_init['scales'], dtype=torch.float32, device=self.device)
+        opacities = torch.tensor(gaussian_init['opacities'], dtype=torch.float32, device=self.device)
+        colors = torch.tensor(gaussian_init['colors'], dtype=torch.float32, device=self.device)
+        
+        # 最適化可能なパラメータを設定
+        means.requires_grad = True
+        quats.requires_grad = True
+        scales.requires_grad = True
+        opacities.requires_grad = True
+        color_lrs = color = torch.tensor(gaussian_init['colors'], dtype=torch.float32, device=self.device)
+        color_lrs.requires_grad = True
+        
+        # オプタイマイザ
+        params = [
+            {'params': [means], 'lr': self.training_config.learning_rate * 0.01},
+            {'params': [quats], 'lr': self.training_config.learning_rate * 0.01},
+            {'params': [scales], 'lr': self.training_config.learning_rate * 0.01},
+            {'params': [opacities], 'lr': self.training_config.learning_rate * 0.1},
+            {'params': [color_lrs], 'lr': self.training_config.learning_rate},
+        ]
+        
+        optimizer = torch.optim.Adam(params, lr=self.training_config.learning_rate * 0.001)
+        
+        num_iterations = self.training_config.num_iterations
+        num_images = len(images)
+        
+        print(f"訓練開始: {num_iterations} イテレーション, {num_images} 画像")
+        
+        # 訓練ループ
+        for i in range(num_iterations):
+            # ランダムな画像を選択
+            img_idx = np.random.randint(num_images)
+            target_image = images[img_idx]
+            cam = camera_matrices[img_idx]
+            
+            K = cam['K']
+            RT = cam['RT']
+            image_size = cam['image_size']
+            
+            # ガウシアンをカメラ座標に変換
+            means_3d = means  # (N, 3)
+            
+            # 世界座標からカメラ座標への変換
+            # project_gaussians関数を使用
+            cam_means, cam_scales, directions, viewdists, valid = project_gaussians(
+                means_3d, quats, scales, opacities, K, RT, image_size
+            )
+            
+            # レンダリング
+            # RGBレンダリング
+            rendered, alphas = rendering(
+                cam_means, cam_scales, quats, opacities, color_lrs,
+                K, RT, image_size
+            )
+            
+            # 損失計算
+            rgb_loss = torch.nn.functional.l1_loss(rendered, target_image[:3])
+            
+            # 各種罰則項
+            scale_reg = torch.maximum(scales.abs(), dim=-1).values.mean()
+            
+            loss = rgb_loss + 0.001 * scale_reg
+            
+            # 逆伝播
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+            
+            # ノーマライゼーション（クォータニオン）
+            with torch.no_grad():
+                quats_norm = torch.norm(quats, dim=-1, keepdim=True)
+                quats = quats / quats_norm
+            
+            if (i + 1) % 1000 == 0:
+                print(f"  イテレーション {i + 1}/{num_iterations}, Loss: {loss.item():.4f}")
+        
+        # 結果を保存
+        print("結果を保存中...")
+        self._save_results(means, quats, scales, opacities, color_lrs, camera_matrices)
+        
+        # GaussianDataを返す
+        gaussian_data = GaussianData(
+            means=means.cpu().numpy(),
+            quats=quats.cpu().numpy(),
+            scales=scales.cpu().numpy(),
+            opacities=opacities.cpu().numpy(),
+            colors=color_lrs.cpu().numpy(),
+            camera_params=camera_matrices,
+            image_paths=image_paths
+        )
+        
+        print(f"訓練完了。出力: {self.output_dir}")
+        
+        return gaussian_data
+    
+    def _save_results(self, means, quats, scales, opacities, colors, camera_matrices):
+        """訓練結果を保存"""
+        # NumPy配列に変換して保存
+        np.savez(
+            str(self.output_dir / 'gaussian_params.npz'),
+            means=means.cpu().numpy(),
+            quats=quats.cpu().numpy(),
+            scales=scales.cpu().numpy(),
+            opacities=opacities.cpu().numpy(),
+            colors=colors.cpu().numpy()
+        )
+        
+        # カメラパラメータをJSONとして保存
+        camera_data = []
+        for cam in camera_matrices:
+            camera_data.append({
+                'K': cam['K'].cpu().numpy().tolist(),
+                'RT': cam['RT'].cpu().numpy().tolist(),
+                'width': cam['width'],
+                'height': cam['height']
+            })
+        
+        with open(str(self.output_dir / 'cameras.json'), 'w', encoding='utf-8') as f:
+            json.dump(camera_data, f, indent=2)
+        
+        print(f"  保存先: {self.output_dir}")

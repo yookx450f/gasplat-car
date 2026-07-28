@@ -1,0 +1,30 @@
+version: '3.8'
+
+services:
+  gsplat-car:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: gsplat-car
+    runtime: nvidia
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility,graphics
+    volumes:
+      # 入力画像と出力結果のマウント
+      - ../data:/workspace/data:rw
+      - ../output:/workspace/output:rw
+      - ../config:/workspace/config:ro
+    working_dir: /workspace
+    command: >
+      bash -c "
+      python src/main.py --config config/config.yaml
+      "
+    # GPUアクセスを確保
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]

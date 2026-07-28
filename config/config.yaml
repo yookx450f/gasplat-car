@@ -1,0 +1,71 @@
+# gasplat-car 設定ファイル
+
+# 入力画像の設定
+input:
+  # 入力画像のディレクトリ（data/input内）
+  image_dir: "data/input"
+  # 画像数（8枚を想定）
+  num_images: 8
+  # 画像のリサイズ解像度（最大の辺の長さ）
+  max_image_size: 1024
+
+# Gaussian Splatting 訓練パラメータ
+training:
+  # 訓練イテレーション数
+  num_iterations: 30000
+  # ランダムシード
+  seed: 42
+  # 学習率
+  learning_rate: 0.01
+  # オプタイマイザ（Adam）
+  optimizer:
+    type: "adam"
+    beta1: 0.9
+    beta2: 0.999
+    epsilon: 1e-15
+
+# 画像前処理パラメータ
+preprocessing:
+  # 特徴点検出アルゴリズム
+  feature_detector: "sift"
+  # 特徴点の最大数
+  max_features: 4096
+
+# COLMAPパラメータ
+colmap:
+  # Feature Extractor
+  extractor:
+    camera_model: "simple_pinhole"  # simple_pinhole, pinhole, simple_radial
+    max_image_size: 1024
+    num_threads: 8
+  
+  # Feature Matcher
+  matcher:
+    type: "exhaustive"  # exhaustive, vocabulary_tree
+    vocabulary_tree_file: ""  # 指定しない場合はexhaustiveモード
+  
+  # Bundle Adjustment
+  mapper:
+    min_num_matches: 12
+    max_num_iterations: 100
+    allowed_range_ratio: 0.05
+
+# メッシュ化パラメータ
+meshing:
+  # 法線推定の解像度
+  normal_resolution: 512
+  # マテリアルの解像度
+  material_resolution: 1024
+  # Poisson Reconstructionの深さ
+  poisson_depth: 9
+  # 削除する頂点の閾値（軽すぎる頂点）
+  remove_small_geometry_threshold: 0.01
+
+# 出力設定
+output:
+  # 出力ディレクトリ
+  dir: "output"
+  # 出力形式（glb, obj, 両方）
+  formats: ["glb", "obj"]
+  # ファイル名プレフィックス
+  filename_prefix: "car_model"

@@ -1,0 +1,27 @@
+# gasplat-car 依存パッケージ
+
+# 3D処理
+trimesh>=4.0.0
+
+# 画像処理
+Pillow>=10.0.0
+opencv-python-headless>=4.8.0
+
+# 数値計算
+numpy>=1.24.0
+
+# YAML設定ファイル
+PyYAML>=6.0
+
+# プログレスバー
+tqdm>=4.65.0
+
+# 引数パース
+configargparse>=1.7
+
+# gsplat（NVIDIA公式）
+gsplat>=1.0.0
+
+# PyTorch（GPU対応）
+torch>=2.0.0
+torchvision>=0.15.0

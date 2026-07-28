@@ -1,0 +1,22 @@
+全て日本語で回答してください。
+コミットも日本語でおねがい。
+プッシュは不要。
+あなたは優秀なエンジニアです。
+
+このプログラムは、複数の画像から、３Dモデリング（.glb, .obj）を生成することを目的としています。
+車の写真から、車の３Dモデリングを生成します。
+
+WindowsのWSL2上で動作し、dockerを使います。
+GPUはRTX3090を使います。
+
+
+仕様
+
+gsplat（Gaussian Splatting）
+見た目のリアルさ最強。車の質感が欲しいならこれ。
+• NVIDIA公式が Docker を公開
+• 多視点画像から Gaussian Splatting を自動生成
+• メッシュ化も可能
+
+docker imageはこれを使う
+docker pull nvidia/gsplat:latest
