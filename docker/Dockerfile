@@ -1,11 +1,11 @@
-# ベースイメージ: NVIDIA gsplat公式イメージ
-FROM nvidia/gsplat:latest
+# ベースイメージ: PyTorch GPU対応
+FROM pytorch/pytorch:2.7.0-cuda12.1-runtime-ubuntu22.04
 
 # 環境変数の設定
 ENV PYTHONPATH="/workspace:$PYTHONPATH"
 ENV DEBIAN_FRONTEND=noninteractive
 
-# 必要なシステムパッケージのインストール（COLMAP用）
+# 必要なシステムパッケージのインストール
 RUN apt-get update && apt-get install -y \
     wget \
     git \
@@ -21,8 +21,9 @@ RUN wget https://github.com/colmap/colmap/releases/download/3.3.1/colmap-3.3.1-l
     ./colmap-3.3.1-linux.run --prefix /usr/local --notimestamp --yes && \
     rm colmap-3.3.1-linux.run
 
-# 追加のPythonパッケージをインストール（gsplat公式イメージに含まれていないもの）
+# gsplatのインストール（CUDA対応）
 RUN pip install --no-cache-dir \
+    gsplat \
     opencv-python-headless \
     trimesh \
     pyyaml \
