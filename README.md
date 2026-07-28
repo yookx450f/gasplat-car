@@ -19,10 +19,11 @@ NVIDIA公式の [gsplat](https://github.com/NVlabs/gsplat) を使用し、 Gauss
 
 ## インストール
 
-### 1. Dockerイメージの取得（PyTorch GPU版）
+### 1. Dockerイメージの取得（既にローカルに存在している場合）
 
 ```bash
-docker pull pytorch/pytorch:2.7.0-cuda12.1-runtime-ubuntu22.04
+# PyTorch GPU対応イメージ（既に持っている場合）
+docker pull pytorch/pytorch:latest
 ```
 
 ## 使用方法

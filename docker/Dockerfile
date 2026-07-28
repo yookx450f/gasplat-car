@@ -1,5 +1,5 @@
 # ベースイメージ: PyTorch GPU対応
-FROM pytorch/pytorch:2.7.0-cuda12.1-runtime-ubuntu22.04
+FROM pytorch/pytorch:latest
 
 # 環境変数の設定
 ENV PYTHONPATH="/workspace:$PYTHONPATH"
