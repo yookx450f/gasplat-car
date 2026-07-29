@@ -27,7 +27,8 @@ RUN pip install --no-cache-dir \
     Pillow \
     packaging \
     scipy \
-    gsplat
+    gsplat \
+    open3d
 
 # ワークディレクトリの設定
 WORKDIR /workspace

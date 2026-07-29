@@ -83,6 +83,11 @@ class ModelExporter:
             出力ファイルパス
         """
         try:
+            # vertices/facesがNoneの場合、処理できない
+            if mesh_data.vertices is None or mesh_data.faces is None:
+                print("  警告: メッシュデータが空です。GLBを生成できません。")
+                return None
+            
             # trimeshオブジェクトを作成
             mesh = trimesh.Trimesh(
                 vertices=mesh_data.vertices,
@@ -120,6 +125,11 @@ class ModelExporter:
             出力ファイルパス
         """
         try:
+            # vertices/facesがNoneの場合、処理できない
+            if mesh_data.vertices is None or mesh_data.faces is None:
+                print("  警告: メッシュデータが空です。OBJを生成できません。")
+                return None
+            
             # trimeshオブジェクトを作成
             mesh = trimesh.Trimesh(
                 vertices=mesh_data.vertices,

@@ -9,14 +9,10 @@
 WindowsのWSL2上で動作し、dockerを使います。
 GPUはRTX3090を使います。
 
+LLMは zoo code を通して使っているので、
+必ず zoo code のルールに従ってレスポンスを返すこと。
+（ツールの形式に従わないと、エラーになり進むことができない）
 
-仕様
 
-gsplat（Gaussian Splatting）
-見た目のリアルさ最強。車の質感が欲しいならこれ。
-• NVIDIA公式が Docker を公開
-• 多視点画像から Gaussian Splatting を自動生成
-• メッシュ化も可能
-
-docker imageはこれを使う
-docker pull nvidia/gsplat:latest
+zoo code でコードの編集に失敗することが多い。
+zoo code のルールをよく確認して編集を行うこと。

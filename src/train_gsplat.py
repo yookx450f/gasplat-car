@@ -289,7 +289,7 @@ class GaussianSplattingTrainer:
         
         return camera_matrices
     
-    def train(self, colmap_results: Dict) -> GaussianData:
+    def train(self, colmap_results: Dict, intermediate_manager=None) -> GaussianData:
         """
         Gaussian Splattingの訓練を実行
         
@@ -297,6 +297,8 @@ class GaussianSplattingTrainer:
         ----------
         colmap_results : dict
             COLMAP処理結果
+        intermediate_manager : IntermediateOutputManager or None
+            中間結果出力マネージャー（オプション）
         
         Returns
         -------
@@ -404,6 +406,13 @@ class GaussianSplattingTrainer:
             with torch.no_grad():
                 quats_norm = torch.norm(quats, dim=-1, keepdim=True)
                 quats = quats / quats_norm
+            
+            # 中間結果出力（レンダリング画像の保存）
+            if intermediate_manager is not None:
+                render_image = (render_colors[0].detach().cpu().numpy() * 255).astype(np.uint8)
+                # 値域を0-255にクリップ
+                render_image = np.clip(render_image, 0, 255)
+                intermediate_manager.save_gsplat_render(i + 1, render_image)
             
             if (i + 1) % 1000 == 0:
                 print(f"  イテレーション {i + 1}/{num_iterations}, Loss: {loss.item():.4f}")

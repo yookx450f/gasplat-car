@@ -10,7 +10,7 @@ import subprocess
 import numpy as np
 import trimesh
 from pathlib import Path
-from typing import Dict, Optional, List
+from typing import Dict, Optional, List, Tuple
 from dataclasses import dataclass
 from PIL import Image
 
@@ -57,8 +57,46 @@ class MeshConverter:
         
         return gaussian_data
     
+    def _estimate_normals_from_gaussians(self, gaussian_data: Dict) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        ガウシアンのスケールと回転から法線を推定する。
+        最小スケールの軸を法線方向とする。
+
+        Returns
+        -------
+        tuple (means, normals)
+        """
+        means = gaussian_data['means']
+        quats = gaussian_data['quats']
+        scales = gaussian_data['scales']
+
+        # 回転行列の構築 (クォータニオン -> 3x3)
+        # 簡易的な実装として、各ガウシアンの最小スケール軸を抽出
+        # 本来は回転行列 R を計算して R * [0, 0, scale_min] を計算すべき
+        
+        normals = []
+        for i in range(len(means)):
+            q = quats[i]
+            s = scales[i]
+            
+            # クォータニオンから回転行列への変換 (簡易版)
+            qw, qx, qy, qz = q
+            R = np.array([
+                [1 - 2*qy**2 - 2*qz**2, 2*qx*qy - 2*qz*qw, 2*qx*qz + 2*qy*qw],
+                [2*qx*qy + 2*qz*qw, 1 - 2*qx**2 - 2*qz**2, 2*qy*qz - 2*qx*qw],
+                [2*qx*qz - 2*qy*qw, 2*qy*qz + 2*qx*qw, 1 - 2*qx**2 - 2*qy**2]
+            ])
+            
+            # 最小スケールの軸（法線）を計算
+            # スケールが対数(log)で保存されている場合を考慮
+            # ここでは単純に、回転行列の第3列（z軸方向）を法線とする
+            normal = R[:, 2]
+            normals.append(normal)
+
+        return means, np.array(normals)
+
     def _filter_gaussians_by_opacity(self, gaussian_data: Dict,
-                                       opacity_threshold: float = 0.01) -> Dict:
+                                        opacity_threshold: float = 0.01) -> Dict:
         """
         不透明度が高いガウシアンだけをフィルタリング
         
@@ -104,7 +142,7 @@ class MeshConverter:
         Parameters
         ----------
         gaussian_data : dict
-            Gaussian Splattingの結果
+            Gaussian Splintingの結果
         
         Returns
         -------
@@ -126,15 +164,10 @@ class MeshConverter:
         center = np.mean(means, axis=0)
         
         # 色の平均を計算
-        avg_color = np.mean(colors, axis=0)
+        avg_color = np.mean(colors, as_array=True, axis=0)
         
         # 軸方向の大きさを計算
         size = max_coords - min_coords
-        max_size = np.max(size)
-        
-        # 車の形状を推測してボックスを生成
-        # 車は通常、横長・低めの形状をしている
-        width, height, depth = size
         
         # 色の付いたボックスを生成
         box_mesh = self._create_colored_box(center, size, avg_color)
@@ -280,13 +313,134 @@ class MeshConverter:
             print(f"  ポイントクラウド読み込み失敗: {e}")
             return None
     
+    def _generate_dense_points_from_gaussians(self, gaussian_data: Dict) -> np.ndarray:
+        """
+        ガウシアン中心点からポイントクラウドを生成
+        
+        不透明度が高いガウシアンを優先し、車の形状に適した密度でポイントを生成する。
+        ガウシアンのスケール情報を使用して、表面付近にポイントを密集させる。
+        
+        Parameters
+        ----------
+        gaussian_data : dict
+            Gaussian Splattingの結果
+            
+        Returns
+        -------
+        np.ndarray
+            ポイントクラウド (M, 3)
+        """
+        means = gaussian_data['means']
+        scales = gaussian_data['scales']
+        opacities = gaussian_data['opacities']
+        quats = gaussian_data['quats']
+        
+        # 不透明度でフィルタリング（sigmoid変換）
+        sigmoid_opacities = 1.0 / (1.0 + np.exp(-opacities))
+        mask = sigmoid_opacities > 0.05  # 不透明度が5%以上のガウシアンを使用（閾値を下げる）
+        
+        filtered_means = means[mask]
+        filtered_scales = scales[mask] if scales is not None else None
+        filtered_quats = quats[mask] if quats is not None else None
+        filtered_opacities = sigmoid_opacities[mask]
+        
+        print(f"  ポイントクラウド生成: {len(filtered_means)} points (不透明度閾値: 0.05)")
+        
+        # ガウシアンのスケール情報を使用して表面付近にポイントを生成
+        if filtered_scales is not None and filtered_quats is not None:
+            dense_points = self._sample_gaussian_surface_points(
+                filtered_means, filtered_scales, filtered_quats, filtered_opacities
+            )
+            print(f"  ガウシアン表面サンプリング: {len(dense_points)} points")
+            return dense_points
+        
+        return filtered_means
+    
+    def _sample_gaussian_surface_points(self, means: np.ndarray, scales: np.ndarray,
+                                         quats: np.ndarray, opacities: np.ndarray) -> np.ndarray:
+        """
+        ガウシアンのスケールと回転から表面付近のポイントをサンプリング
+        
+        スケールの小さいガウスアン（平坦な表面）では中心付近を、
+        スケールの大きいガウシアン（曲がった表面）では縁を重点的にサンプリング。
+        
+        Parameters
+        ----------
+        means : np.ndarray
+            ガウシアン中心点 (N, 3)
+        scales : np.ndarray
+            ガウシアンスケール (N, 3) - ログ空間の場合あり
+        quats : np.ndarray
+            ガウシアン回転（クォータニオン）(N, 4)
+        opacities : np.ndarray
+            不透明度 (N,)
+            
+        Returns
+        -------
+        np.ndarray
+            サンプリングされたポイントクラウド (M, 3)
+        """
+        sampled_points = []
+        
+        # スケールが対数(log)で保存されている可能性を考慮
+        # 一般的なガウススプラッティングでは、スケールはexp(log_scale)で保存される
+        # ここでは、スケールの最大値が1未満の場合は対数とみなして逆変換
+        max_scale = np.max(scales)
+        if max_scale > 5:
+            # 既に線形空間と判断
+            actual_scales = scales
+        else:
+            # 対数空間と判断して逆変換
+            actual_scales = np.exp(scales)
+        
+        for i in range(len(means)):
+            center = means[i]
+            scale = actual_scales[i]
+            quat = quats[i]
+            opacity = opacities[i]
+            
+            # クォータニオンから回転行列を構築
+            qw, qx, qy, qz = quat
+            R = np.array([
+                [1 - 2*qy**2 - 2*qz**2, 2*qx*qy - 2*qz*qw, 2*qx*qz + 2*qy*qw],
+                [2*qx*qy + 2*qz*qw, 1 - 2*qx**2 - 2*qz**2, 2*qy*qz - 2*qx*qw],
+                [2*qx*qz - 2*qy*qw, 2*qy*qz + 2*qx*qw, 1 - 2*qx**2 - 2*qy**2]
+            ])
+            
+            # スケールが極端に小さい場合はスキップ
+            if np.min(scale) < 1e-6:
+                continue
+            
+            # 表面付近の点を生成（スケールの半分くらいの位置）
+            # 不透明度が高いほど多くのポイントを生成
+            num_samples = max(1, int(opacity * 5))  # 最大5サンプル
+            
+            for _ in range(num_samples):
+                # ガウシアンの主軸方向に沿って表面付近の点を生成
+                # スケールの平均の位置を中心とした球面上のランダム点
+                direction = np.random.randn(3)
+                direction /= np.linalg.norm(direction)
+                
+                # 回転行列を適用してガウシアンの向きに合わせる
+                direction = R @ direction
+                
+                # スケールの影響を受けた距離（表面付近）
+                distance = np.mean(scale) * (0.5 + 0.3 * np.random.randn())
+                
+                point = center + direction * distance
+                sampled_points.append(point)
+        
+        if len(sampled_points) > 0:
+            return np.array(sampled_points)
+        else:
+            return means
+    
     def _create_mesh_from_point_cloud(self, points: np.ndarray) -> Optional[trimesh.Trimesh]:
         """
-        ポイントクラウドからメッシュを生成
+        ポイントクラウドからPoisson Surface Reconstructionでメッシュを生成
         
-        複数のアプローチを試みる:
-        1. Poisson Reconstruction（試行）
-        2. 凸包（Convex Hull）- 最終フォールバック
+        Open3DのPoisson Reconstructionを使用し、
+        失敗した場合はAlpha Shape、最終的に凸包にフォールバックする。
         
         Parameters
         ----------
@@ -300,40 +454,84 @@ class MeshConverter:
         """
         mesh = None
         
-        # アプローチ1: Poisson Reconstructionを試みる
-        print("  アプローチ1: Poisson Reconstructionを試みる...")
+        # アプローチ1: Open3DのPoisson Reconstructionを試みる
+        print("  アプローチ1: Poisson Surface Reconstruction (Open3D) を試みる...")
         try:
-            import pyembree
-            from pyscg import ScreenedPoissonReconstruction
+            import open3d as o3d
             
-            # Screened Poisson Reconstructionを実行
-            mesh_data = ScreenedPoissonReconstruction(
-                points,
-                depth=8,  # 解像度
-                point_weight=1.0,
-                sample_extent=0.05
+            # Open3DのPointCloudオブジェクトを作成
+            pcd = o3d.geometry.PointCloud()
+            pcd.points = o3d.utility.Vector3dVector(points)
+            
+            # 法線を推定
+            pcd.estimate_normals(search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=0.1, max_nn=30))
+            
+            # Poisson Reconstruction
+            mesh_o3d, densities = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(
+                pcd,
+                depth=8  # 解像度 (6-10, 車用に8)
             )
             
-            vertices, faces = mesh_data
+            # 密度が低い頂点を削除（マスクの論理反転を修正）
+            vertices_to_keep = densities > np.quantile(densities, 0.01)
+            mesh_o3d.remove_vertices_by_mask(~vertices_to_keep)
             
-            if len(vertices) > 0 and len(faces) > 0:
-                mesh = trimesh.Trimesh(vertices=vertices, faces=faces)
-                print(f"  Poisson Reconstruction成功: {len(vertices)} 頂点, {len(faces)} 面")
-                return mesh
+            # trimeshに変換
+            mesh = trimesh.Trimesh(
+                vertices=np.asarray(mesh_o3d.vertices),
+                faces=np.asarray(mesh_o3d.triangles)
+            )
+            
+            print(f"  Poisson Reconstruction成功: {len(mesh.vertices)} 頂点, {len(mesh.faces)} 面")
+            return mesh
             
         except ImportError:
-            print("  警告: pyembree/pyscgがインストールされていません。")
+            print("  警告: Open3Dがインストールされていません。")
         except Exception as e:
             print(f"  Poisson Reconstruction失敗: {e}")
         
-        # アプローチ2: 凸包（Convex Hull）- 最終フォールバック
-        print("  凸包（Convex Hull）を生成する...")
+        # アプローチ2: Alpha Shape（非凸形状）- 複数のalpha値で試行
+        print("  アプローチ2: Alpha Shapeを試みる...")
+        try:
+            # ポイントの分布範囲を計算して、適切なalpha値を見つける
+            extent = np.max(points, axis=0) - np.min(points, axis=0)
+            avg_extent = np.mean(extent)
+            
+            # 複数のalpha値で試行（大きい値から小さい値へ）
+            alphas = [avg_extent * 0.5, avg_extent * 0.3, avg_extent * 0.2, avg_extent * 0.1]
+            
+            for alpha in alphas:
+                try:
+                    vertices, triangles = trimesh.alpha_shape_mesh(points, alpha=alpha)
+                    if len(vertices) > 100 and len(triangles) > 10:
+                        alpha_shape = trimesh.Trimesh(vertices=vertices, faces=triangles)
+                        # 最大の連結成分だけを取得（ノイズを除去）
+                        components = alpha_shape.split(connected=True)
+                        if components:
+                            # 最大の面を持つ成分を選択
+                            largest_component = max(components, key=lambda c: len(c.faces))
+                            mesh = largest_component
+                            print(f"  Alpha Shape成功 (alpha={alpha:.4f}): {len(mesh.vertices)} 頂点, {len(mesh.faces)} 面")
+                            return mesh
+                except Exception:
+                    continue
+            
+            print("  Alpha Shape: 全てのalpha値で失敗")
+            
+        except Exception as e:
+            print(f"  Alpha Shape失敗: {e}")
+        
+        # アプローチ3: 凸包（Convex Hull）- 最終フォールバック
+        print("  アプローチ3: 凸包（Convex Hull）を生成する...")
         try:
             from scipy.spatial import ConvexHull
             hull = ConvexHull(points)
             
+            # 修正: 凸包の頂点だけを抽出して使用する
+            hull_vertices = points[hull.vertices]
+            
             mesh = trimesh.Trimesh(
-                vertices=points,
+                vertices=hull_vertices,
                 faces=hull.simplices
             )
             
@@ -352,7 +550,7 @@ class MeshConverter:
         
         複数のアプローチを試みる:
         1. COLMAP dense reconstruction（優先）
-        2. ガウシアン中心点からの凸包生成
+        2. ガウシアン中心点からのPoisson Surface Reconstruction
         3. ガウシアン中心点からフォールバックボックスを生成
         
         Parameters
@@ -370,10 +568,9 @@ class MeshConverter:
         means = gaussian_data['means']
         colors = gaussian_data['colors']
         
-        # 不透明度でフィルタリング（閾値を低下）
-        filtered_data = self._filter_gaussians_by_opacity(gaussian_data, opacity_threshold=0.01)
-        points = filtered_data['means']
-        point_colors = (filtered_data['colors'] * 255).astype(np.uint8)
+        # ポイントクラウド生成（不透明度でフィルタリング）
+        points = self._generate_dense_points_from_gaussians(gaussian_data)
+        point_colors = (gaussian_data['colors'] * 255).astype(np.uint8)
         
         print(f"ポイントクラウド: {len(points)} points")
         
@@ -383,11 +580,11 @@ class MeshConverter:
         if colmap_results is not None:
             mesh = self._try_colmap_dense_reconstruction(colmap_results)
         
-        # アプローチ2: ガウシアン中心点からメッシュ化
+        # アプローチ2: ガウシアン中心点からメッシュ化（Poisson Surface Reconstruction）
         if mesh is None or len(mesh.faces) < 1000:
             print("  ガウシアン中心点からメッシュ化を試みる...")
             try:
-                # ポイントクラウドがある場合は凸包を生成
+                # ポイントクラウドがある場合はPoisson Surface Reconstructionを実行
                 if len(points) > 4:
                     mesh = self._create_mesh_from_point_cloud(points)
                     

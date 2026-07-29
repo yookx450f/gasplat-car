@@ -1,0 +1,90 @@
+[
+    {
+        "width": 480,
+        "height": 360,
+        "focal_length_px": 2722.8525121555917,
+        "principal_point": [
+            240.0,
+            180.0
+        ],
+        "distortion_coeffs": [],
+        "assumed": true
+    },
+    {
+        "width": 480,
+        "height": 360,
+        "focal_length_px": 2722.8525121555917,
+        "principal_point": [
+            240.0,
+            180.0
+        ],
+        "distortion_coeffs": [],
+        "assumed": true
+    },
+    {
+        "width": 480,
+        "height": 360,
+        "focal_length_px": 2722.8525121555917,
+        "principal_point": [
+            240.0,
+            180.0
+        ],
+        "distortion_coeffs": [],
+        "assumed": true
+    },
+    {
+        "width": 480,
+        "height": 360,
+        "focal_length_px": 2722.8525121555917,
+        "principal_point": [
+            240.0,
+            180.0
+        ],
+        "distortion_coeffs": [],
+        "assumed": true
+    },
+    {
+        "width": 1024,
+        "height": 768,
+        "focal_length_px": 5808.752025931929,
+        "principal_point": [
+            512.0,
+            384.0
+        ],
+        "distortion_coeffs": [],
+        "assumed": true
+    },
+    {
+        "width": 480,
+        "height": 360,
+        "focal_length_px": 2722.8525121555917,
+        "principal_point": [
+            240.0,
+            180.0
+        ],
+        "distortion_coeffs": [],
+        "assumed": true
+    },
+    {
+        "width": 480,
+        "height": 360,
+        "focal_length_px": 2722.8525121555917,
+        "principal_point": [
+            240.0,
+            180.0
+        ],
+        "distortion_coeffs": [],
+        "assumed": true
+    },
+    {
+        "width": 480,
+        "height": 360,
+        "focal_length_px": 2722.8525121555917,
+        "principal_point": [
+            240.0,
+            180.0
+        ],
+        "distortion_coeffs": [],
+        "assumed": true
+    }
+]

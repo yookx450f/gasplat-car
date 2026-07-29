@@ -83,3 +83,12 @@ output:
   formats: ["glb", "obj"]
   # ファイル名プレフィックス
   filename_prefix: "car_model"
+
+# 中間結果出力設定
+intermediate_output:
+  # 出力の有効化
+  enabled: true
+  # 出力ディレクトリ
+  dir: "output/intermediate"
+  # Gaussian Splatting訓練中の出力間隔（イテレーション数）
+  gs_render_interval: 5000

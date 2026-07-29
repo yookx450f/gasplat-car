@@ -25,6 +25,7 @@ from colmap_runner import ColmapRunner
 from train_gsplat import GaussianSplattingTrainer
 from mesh_converter import MeshConverter
 from export import ModelExporter
+from intermediate_output import IntermediateOutputManager
 
 
 def load_config(config_path: str) -> dict:
@@ -60,12 +61,18 @@ def run_pipeline(config: dict):
     print("gasplat-car 処理開始")
     print("=" * 60)
     
+    # 中間結果出力マネージャーの初期化
+    intermediate_manager = IntermediateOutputManager(config)
+    
     # ステップ1: 画像前処理
     print("\n" + "=" * 40)
     print("ステップ1: 画像前処理")
     print("=" * 40)
     preprocessor = ImagePreprocessor(config)
     processed_data = preprocessor.process()
+    
+    # 前処理結果の保存
+    intermediate_manager.save_preprocessing_results(processed_data)
     
     # ステップ2: COLMAPによるCamera Pose推定
     print("\n" + "=" * 40)
@@ -77,6 +84,8 @@ def run_pipeline(config: dict):
     colmap_results = None
     try:
         colmap_results = colmap_runner.run(processed_data)
+        # COLMAP結果の保存
+        intermediate_manager.save_colmap_results(colmap_results)
     except RuntimeError as e:
         print(f"  警告: COLMAP処理でエラーが発生しました: {e}")
         print(f"  警告: 処理を続行します...")
@@ -94,7 +103,7 @@ def run_pipeline(config: dict):
     print("ステップ3: Gaussian Splatting 訓練")
     print("=" * 40)
     gs_trainer = GaussianSplattingTrainer(config)
-    gs_result = gs_trainer.train(colmap_results)
+    gs_result = gs_trainer.train(colmap_results, intermediate_manager=intermediate_manager)
     
     # ステップ4: メッシュ化
     print("\n" + "=" * 40)
@@ -102,6 +111,9 @@ def run_pipeline(config: dict):
     print("=" * 40)
     mesh_converter = MeshConverter(config)
     mesh_data = mesh_converter.convert(gs_result, colmap_results)
+    
+    # メッシュ化結果の保存
+    intermediate_manager.save_mesh_results(mesh_data)
     
     # ステップ5: 出力エクスポート
     print("\n" + "=" * 40)
