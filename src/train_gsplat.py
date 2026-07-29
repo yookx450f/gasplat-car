@@ -142,20 +142,24 @@ class GaussianSplattingTrainer:
             # ガウシアン数を調整
             num_gaussians = len(means)
         
-        # スケールを計算（近傍ポイントに基づいて）
+        # スケールを計算（近傍ポイントに基づいて）- gsplatはlogスケールを期待
         if len(means) > 1:
             dists = np.linalg.norm(means[1:] - means[:-1], axis=1)
             median_dist = np.median(dists) if len(dists) > 0 else 0.1
-            scales = np.log(np.full((num_gaussians, 3), max(median_dist * 0.1, 0.01)))
+            # logスケール: 小さな値で初期化（後で最適化される）
+            # 極端に小さい値にならないように下限を緩和（0.001 → 0.01）
+            scales = np.full((num_gaussians, 3), np.log(max(median_dist * 0.5, 0.01)))
         else:
-            scales = np.log(np.full((num_gaussians, 3), 0.1))
+            # デフォルト: log(0.01) ≈ -4.6
+            scales = np.full((num_gaussians, 3), np.log(0.01))
         
         # 回転（クォータニオン）- 初期値はアイデンティティ
         quats = np.zeros((num_gaussians, 4))
         quats[:, 0] = 1.0  # qw = 1, qx = qy = qz = 0
         
-        # 不透明度
-        opacities = np.log(np.exp(np.full(num_gaussians, -1)))  # 初期値は中程度
+        # 不透明度 - 初期値を少し高い値に設定（sigmoid前に適度な値）
+        # 低い値だとガウシアンが透明すぎてレンダリングが真っ黒になる
+        opacities = np.full(num_gaussians, -0.5)  # sigmoid(-0.5) ≈ 0.38
         
         gaussian_data = {
             'means': means.astype(np.float32),
@@ -183,6 +187,8 @@ class GaussianSplattingTrainer:
         """
         images = colmap_results.get('images', {})
         cameras = colmap_results.get('cameras', {})
+        
+        print(f"  COLMAP結果: {len(images)}画像, {len(cameras)}カメラ")
         
         camera_matrices = []
         image_sizes = []
@@ -232,6 +238,8 @@ class GaussianSplattingTrainer:
             })
             
             image_sizes = (height, width)
+        
+        print(f"  準備されたカメラ行列数: {len(camera_matrices)}")
         
         return camera_matrices, image_sizes
     
@@ -320,6 +328,12 @@ class GaussianSplattingTrainer:
         print("ガウシアンを初期化中...")
         gaussian_init = self._initialize_gaussians(colmap_results)
         
+        # 追加デバッグログ
+        print(f"  [DEBUG] COLMAP points3D数: {len(colmap_results.get('points3D', [])) if colmap_results.get('points3D') is not None else 0}")
+        print(f"  [DEBUG] COLMAP images数: {len(colmap_results.get('images', {}))}")
+        print(f"  [DEBUG] ガウシアン初期化後 - means形状: {gaussian_init['means'].shape}")
+        print(f"  [DEBUG] ガウシアン初期化後 - colors形状: {gaussian_init['colors'].shape}")
+        
         # PyTorchテンソルに変換
         means = torch.tensor(gaussian_init['means'], dtype=torch.float32, device=self.device)
         quats = torch.tensor(gaussian_init['quats'], dtype=torch.float32, device=self.device)
@@ -349,13 +363,36 @@ class GaussianSplattingTrainer:
         num_iterations = self.training_config.num_iterations
         num_images = len(images)
         
+        # デバッグログ: パラメータの確認
         print(f"訓練開始: {num_iterations} イテレーション, {num_images} 画像")
+        print(f"  ガウシアン数: {means.shape[0]}")
+        print(f"  means範囲: [{means.min():.4f}, {means.max():.4f}]")
+        print(f"  scales範囲: [{scales.min():.4f}, {scales.max():.4f}]")
+        print(f"  opacities範囲: [{opacities.min():.4f}, {opacities.max():.4f}]")
+        print(f"  colors範囲: [{colors.min():.4f}, {colors.max():.4f}]")
+        print(f"  カメラ数: {len(camera_matrices)}")
+        if len(camera_matrices) > 0:
+            cam0 = camera_matrices[0]
+            print(f"  カメラ0 K:\n{cam0['K']}")
+            print(f"  カメラ0 RT:\n{cam0['RT']}")
+            print(f"  カメラ0 サイズ: {cam0['width']}x{cam0['height']}")
+        
+        # 最初のイテレーションでフォールバックカメラを使用している場合、警告
+        if len(camera_matrices) == 0:
+            print("  警告: カメラ行列が空です。レンダリングが正しく行われない可能性があります。")
         
         # 訓練ループ
         for i in range(num_iterations):
             # ランダムな画像を選択
             img_idx = np.random.randint(num_images)
             target_image = images[img_idx]
+            
+            # カメラ行列が空の場合はスキップ
+            if len(camera_matrices) == 0:
+                if i == 0:
+                    print("  エラー: カメラ行列が空のため訓練できません。COLMAP結果を確認してください。")
+                break
+            
             cam = camera_matrices[img_idx]
             
             K = cam['K']
@@ -414,8 +451,39 @@ class GaussianSplattingTrainer:
                 render_image = np.clip(render_image, 0, 255)
                 intermediate_manager.save_gsplat_render(i + 1, render_image)
             
-            if (i + 1) % 1000 == 0:
+            # レンダリング結果の追加デバッグ（最初の10イテレーションと每5000イテレーション）
+            if i < 10 or (i + 1) % 5000 == 0:
+                # alphaチャンネルの平均（透明すぎる場合、ガウシアンが正しくラスタライズされていない）
+                if render_alphas is not None:
+                    alpha_stats = render_alphas[0].detach().cpu().numpy()
+                    print(f"    [ALPHA]  mean={alpha_stats.mean():.4f}, min={alpha_stats.min():.4f}, max={alpha_stats.max():.4f}, >0.01={np.sum(alpha_stats > 0.01)}ピクセル")
+            
+            # 最初の数イテレーションでレンダリング結果の統計を出力
+            if i < 5 or (i + 1) % 1000 == 0:
+                render_mean = render_colors[0].mean().item()
+                render_std = render_colors[0].std().item()
+                render_min = render_colors[0].min().item()
+                render_max = render_colors[0].max().item()
+                
+                # alphaチャンネルの統計
+                if render_alphas is not None:
+                    alpha_mean = render_alphas[0].mean().item()
+                    alpha_min = render_alphas[0].min().item()
+                    alpha_max = render_alphas[0].max().item()
+                else:
+                    alpha_mean = alpha_min = alpha_max = -1
+                
+                # カメラ座標系でのガウシアン位置を確認
+                cam = camera_matrices[img_idx]
+                RT = cam['RT']
+                # ガウシアンの一部をカメラ座標に変換（最初の10個のみ）
+                num_debug = min(10, means_3d.shape[0])
+                means_cam = (RT[:3, :3] @ means_3d[:num_debug].T).T + RT[:3, 3]
+                
                 print(f"  イテレーション {i + 1}/{num_iterations}, Loss: {loss.item():.4f}")
+                print(f"    render_colors: mean={render_mean:.4f}, std={render_std:.4f}, min={render_min:.4f}, max={render_max:.4f}")
+                print(f"    render_alphas: mean={alpha_mean:.4f}, min={alpha_min:.4f}, max={alpha_max:.4f}")
+                print(f"    ガウシアン位置(カメラ座標): xyz範囲=[{means_cam[:,2].min():.2f}, {means_cam[:,2].max():.2f}]")
         
         # 結果を保存
         print("結果を保存中...")
