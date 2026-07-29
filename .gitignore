@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+
+# Output files
+output/car_model.glb
+output/car_model.obj
+output/mesh/mesh.ply
+output/ip
+
+# Data files (binary)
+data/colmap_work/database.db
+data/colmap_work/sparse/0/*.bin
+
+# Docker
+docker/output/
+
+# IDE
+.vscode/
+.idea/
