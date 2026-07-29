@@ -11,7 +11,8 @@ import json
 import numpy as np
 from pathlib import Path
 from typing import List, Dict, Tuple
-from PIL import Image
+from PIL import Image, ImageEnhance, ImageFilter
+import cv2
 
 
 class ImagePreprocessor:
@@ -56,6 +57,78 @@ class ImagePreprocessor:
         
         # LANCZOSフィルタを使用して高品質にリサイズ
         return img.resize((new_width, new_height), Image.LANCZOS)
+    
+    def _enhance_image_for_feature_detection(self, img: Image.Image) -> Image.Image:
+        """
+        特徴点検出用に画像を強化
+        
+        コントラスト強化とエッジ強調を行い、SIFT特徴点を検出しやすくする。
+        
+        Parameters
+        ----------
+        img : Image.Image
+            入力画像
+        
+        Returns
+        -------
+        Image.Image
+            処理後の画像
+        """
+        try:
+            # NumPy配列に変換
+            img_array = np.array(img, dtype=np.float32)
+            
+            # RGBをグレースケールに変換
+            gray = 0.299 * img_array[:,:,0] + 0.587 * img_array[:,:,1] + 0.114 * img_array[:,:,2]
+            
+            # 統計量を計算
+            mean_val = np.mean(gray)
+            std_val = np.std(gray)
+            
+            if std_val < 10:  # コントラストが非常に低い場合
+                # アダプティブなコントラスト強化
+                # ヒストグラム均等化を適用
+                gray_uint8 = ((gray - np.min(gray)) / (np.max(gray) - np.min(gray) + 1e-8) * 255).astype(np.uint8)
+                
+                # CLAHE（Contrast Limited Adaptive Histogram Equalization）
+                clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+                enhanced_gray = clahe.apply(gray_uint8)
+                
+                # 元の画像の色情報を保持
+                enhanced_array = np.stack([enhanced_gray] * 3, axis=-1).astype(np.uint8)
+                return Image.fromarray(enhanced_array, 'RGB')
+            
+            # 通常のコントラスト強化
+            if std_val < 50:
+                # コントラストを強化
+                factor = 50.0 / max(std_val, 1.0)
+                gray = (gray - mean_val) * factor + mean_val
+            
+            # エッジ強調（アンシャープマスキング）
+            ksize = 3  # 奇数のみ許可
+            gray_blur = cv2.GaussianBlur(gray.astype(np.uint8), (ksize, ksize), 0)
+            enhanced = gray + 1.5 * (gray - gray_blur)
+            
+            # 値域を0-255にクリップ
+            enhanced = np.clip(enhanced, 0, 255).astype(np.uint8)
+            
+            # 元の画像の色情報を復元（コントラスト強化を適用）
+            img_array = np.array(img, dtype=np.float32)
+            
+            # グレースケールの強さをRGBに適用
+            ratio = 255.0 / max(np.max(enhanced) - np.min(enhanced), 1.0)
+            enhanced_rgb = img_array.copy()
+            for c in range(3):
+                channel = img_array[:,:,c].astype(np.float32)
+                channel_enhanced = (channel - np.mean(channel)) * ratio + np.mean(channel)
+                enhanced_rgb[:,:,c] = channel_enhanced
+            
+            enhanced_rgb = np.clip(enhanced_rgb, 0, 255).astype(np.uint8)
+            return Image.fromarray(enhanced_rgb, 'RGB')
+            
+        except Exception as e:
+            print(f"  警告: 画像強化に失敗しました ({e})。元の画像を使用します。")
+            return img
     
     def _extract_camera_params(self, img_path: Path, resized_width: int, resized_height: int) -> Dict:
         """
@@ -156,8 +229,11 @@ class ImagePreprocessor:
             # 画像を開く
             img = Image.open(img_path).convert('RGB')
             
+            # 特徴点検出用に画像を強化
+            enhanced_img = self._enhance_image_for_feature_detection(img)
+            
             # リサイズ
-            resized_img = self._resize_image(img, self.max_size)
+            resized_img = self._resize_image(enhanced_img, self.max_size)
             width, height = resized_img.size
             
             # 保存

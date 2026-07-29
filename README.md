@@ -19,11 +19,14 @@ NVIDIA公式の [gsplat](https://github.com/NVlabs/gsplat) を使用し、 Gauss
 
 ## インストール
 
-### 1. Dockerイメージの取得（既にローカルに存在している場合）
+### Dockerイメージのビルドと実行
 
 ```bash
-# PyTorch GPU対応イメージ（既に持っている場合）
-docker pull pytorch/pytorch:latest
+# Dockerイメージをビルド
+docker compose -f docker/docker-compose.yml build
+
+# 入力画像を配置（例: 8枚の車の写真）
+# data/input/ ディレクトリに画像を置く
 ```
 
 ## 使用方法
@@ -34,25 +37,46 @@ docker pull pytorch/pytorch:latest
 
 ```
 data/input/
-├── 01.jpg
-├── 02.jpg
-├── 03.jpg
-├── 04.jpg
-├── 05.jpg
-├── 06.jpg
-├── 07.jpg
-└── 08.jpg
+├── front.jpg
+├── back.jpg
+├── left.jpg
+├── right.jpg
+├── front_left.jpg
+├── front_right.jpg
+├── back_left.jpg
+└── back_right.jpg
 ```
 
-### 実行
+**注意**: 画像の解像度が異なる場合、Gaussian Splatting訓練時に最初の画像のサイズにリサイズされます。
+
+### 実行手順
 
 ```bash
-# Docker Composeで実行（推奨）
-docker compose -f docker/docker-compose.yml build
-docker compose -f docker/docker-compose.yml up
+# 1. Dockerイメージをビルド（初回のみ）
+cd docker
+docker compose build
 
-# 直接Pythonを実行する場合（ローカル環境）
-python src/main.py --config config/config.yaml
+# 2. 入力画像をdata/input/に配置
+
+# 3. Docker Composeで実行
+docker compose up
+
+# 4. 出力を確認
+ls output/
+```
+
+### 直接実行（デバッグ用）
+
+```bash
+# コンテナ内で直接Pythonを実行
+docker run --rm --runtime nvidia \
+  -e NVIDIA_VISIBLE_DEVICES=all \
+  -e QT_QPA_PLATFORM=offscreen \
+  -v $(pwd)/data:/workspace/data:rw \
+  -v $(pwd)/src:/workspace/src:ro \
+  -v $(pwd)/config:/workspace/config:ro \
+  docker-gsplat-car:latest \
+  python3 src/main.py --config config/config.yaml
 ```
 
 ### コマンドラインオプション

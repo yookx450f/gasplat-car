@@ -8,15 +8,21 @@ services:
     environment:
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=compute,utility,graphics
+      # Qtのオフスクリーン表示（COLMAP用）
+      - QT_QPA_PLATFORM=offscreen
     volumes:
       # 入力画像と出力結果のマウント
       - ../data:/workspace/data:rw
       - ../output:/workspace/output:rw
       - ../config:/workspace/config:ro
+      # ソースコードのマウント
+      - ../src:/workspace/src:ro
     working_dir: /workspace
     command: >
       bash -c "
-      python src/main.py --config config/config.yaml
+      # __pycache__をクリアして古いバイトコンパイルを削除
+      find /workspace/src -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
+      python3 src/main.py --config config/config.yaml
       "
     # GPUアクセスを確保
     deploy:

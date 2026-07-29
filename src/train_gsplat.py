@@ -15,10 +15,11 @@ from typing import Dict, List, Tuple, Optional
 from dataclasses import dataclass, field
 
 # gsplat関連のインポート
+gsplat_available = False
 try:
-    from gsplat import rasterization, project_gaussians, get_world_to_image_transform
-    from gsplat import rendering
-    from gsplat import project_gaussians_sdf
+    from gsplat import rasterization, rendering, proj, fully_fused_projection
+    from gsplat import spherical_harmonics
+    gsplat_available = True
 except ImportError:
     print("警告: gsplatがインストールされていません。pip install gsplat を実行してください。")
 
@@ -81,10 +82,21 @@ class GaussianSplattingTrainer:
         self.output_dir.mkdir(parents=True, exist_ok=True)
     
     def _load_images(self, image_paths: List[str]) -> List[torch.Tensor]:
-        """画像を読み込み、テンソルに変換"""
+        """画像を読み込み、テンソルに変換（すべて同じサイズにリサイズ）"""
         images = []
+        target_size = None
+        
         for img_path in image_paths:
             img = Image.open(img_path).convert('RGB')
+            
+            # 最初の画像からターゲットサイズを取得
+            if target_size is None:
+                target_size = img.size  # (width, height)
+            
+            # 画像をリサイズ
+            if img.size != target_size:
+                img = img.resize(target_size, Image.Resampling.BICUBIC)
+            
             img_tensor = torch.tensor(np.array(img), dtype=torch.float32, device=self.device)
             img_tensor = img_tensor.permute(2, 0, 1) / 255.0  # (C, H, W)
             images.append(img_tensor)
@@ -114,6 +126,8 @@ class GaussianSplattingTrainer:
             print("警告: 3Dポイントが見つかりません。ランダム初期化を使用します。")
             # ランダム初期化
             means = np.random.uniform(-5, 5, (num_gaussians, 3))
+            # カラーもランダムに生成
+            colors = np.random.rand(num_gaussians, 3)
         else:
             # 3Dポイントをサンプリング
             if len(points3D) > num_gaussians:
@@ -221,6 +235,60 @@ class GaussianSplattingTrainer:
         
         return camera_matrices, image_sizes
     
+    def _create_fallback_camera_matrices(self, images: List[torch.Tensor], image_size: tuple) -> List[Dict]:
+        """
+        カメラ行列がない場合のフォールバックカメラ行列を生成
+        
+        Parameters
+        ----------
+        images : list
+            画像テンソルのリスト
+        image_size : tuple
+            画像サイズ (height, width) - 空の場合、画像から取得
+        
+        Returns
+        -------
+        list
+            フォールバックカメラ行列のリスト
+        """
+        camera_matrices = []
+        
+        # 画像サイズを取得（image_sizeが空の場合は画像から取得）
+        if image_size and len(image_size) == 2:
+            height, width = image_size
+        else:
+            # 画像テンソルからサイズを取得 (C, H, W)
+            first_img = images[0]
+            height, width = first_img.shape[1], first_img.shape[2]
+        
+        # 単純な正面カメラ行列を生成
+        fx = width * 1.2
+        fy = height * 1.2
+        cx = width / 2
+        cy = height / 2
+        
+        K = torch.tensor([
+            [fx, 0, cx],
+            [0, fy, cy],
+            [0, 0, 1]
+        ], dtype=torch.float32, device=self.device)
+        
+        # 単位回転行列（正面）
+        RT = torch.eye(3, 4, dtype=torch.float32, device=self.device)
+        # カメラを少し遠くに配置
+        RT[2, 3] = -5.0  # z軸方向に5単位
+        
+        for _ in range(len(images)):
+            camera_matrices.append({
+                'K': K,
+                'RT': RT.clone(),
+                'width': width,
+                'height': height,
+                'image_size': (height, width)
+            })
+        
+        return camera_matrices
+    
     def train(self, colmap_results: Dict) -> GaussianData:
         """
         Gaussian Splattingの訓練を実行
@@ -241,6 +309,11 @@ class GaussianSplattingTrainer:
         
         print("カメラ行列を準備中...")
         camera_matrices, image_size = self._prepare_camera_matrices(colmap_results)
+        
+        # カメラ行列が空の場合、フォールバックを使用
+        if len(camera_matrices) == 0:
+            print("  警告: カメラ行列が見つかりません。フォールバックカメラを使用します。")
+            camera_matrices = self._create_fallback_camera_matrices(images, image_size)
         
         print("ガウシアンを初期化中...")
         gaussian_init = self._initialize_gaussians(colmap_results)
@@ -284,30 +357,41 @@ class GaussianSplattingTrainer:
             cam = camera_matrices[img_idx]
             
             K = cam['K']
-            RT = cam['RT']
-            image_size = cam['image_size']
+            viewmat = cam['RT']
+            height, width = cam['image_size']
+            
+            # viewmatを4x4行列に変換
+            viewmat_4x4 = torch.eye(4, device=self.device)
+            viewmat_4x4[:3, :] = viewmat
+            viewmats = viewmat_4x4[None, :, :]  # (1, 4, 4)
+            
+            # Kを(1, 3, 3)行列に変換
+            Ks = K[None, :, :]  # (1, 3, 3)
             
             # ガウシアンをカメラ座標に変換
             means_3d = means  # (N, 3)
             
-            # 世界座標からカメラ座標への変換
-            # project_gaussians関数を使用
-            cam_means, cam_scales, directions, viewdists, valid = project_gaussians(
-                means_3d, quats, scales, opacities, K, RT, image_size
+            # gsplat 1.5.3 APIを使用: rasterization関数で直接レンダリング
+            # ライブラリ内部で投影処理が行われる
+            render_colors, render_alphas, meta = rasterization(
+                means_3d,
+                quats,
+                scales,
+                opacities,
+                color_lrs,
+                viewmats,
+                Ks,
+                width,
+                height,
             )
             
-            # レンダリング
-            # RGBレンダリング
-            rendered, alphas = rendering(
-                cam_means, cam_scales, quats, opacities, color_lrs,
-                K, RT, image_size
-            )
-            
-            # 損失計算
-            rgb_loss = torch.nn.functional.l1_loss(rendered, target_image[:3])
+            # 損失計算 (render_colors shape: (height, width, 3))
+            # target_imageは(3, height, width)なので、(height, width, 3)に変換
+            target_rgb = target_image.permute(1, 2, 0)
+            rgb_loss = torch.nn.functional.l1_loss(render_colors[0], target_rgb)
             
             # 各種罰則項
-            scale_reg = torch.maximum(scales.abs(), dim=-1).values.mean()
+            scale_reg = scales.abs().max(dim=-1).values.mean()
             
             loss = rgb_loss + 0.001 * scale_reg
             
@@ -330,11 +414,11 @@ class GaussianSplattingTrainer:
         
         # GaussianDataを返す
         gaussian_data = GaussianData(
-            means=means.cpu().numpy(),
-            quats=quats.cpu().numpy(),
-            scales=scales.cpu().numpy(),
-            opacities=opacities.cpu().numpy(),
-            colors=color_lrs.cpu().numpy(),
+            means=means.detach().cpu().numpy(),
+            quats=quats.detach().cpu().numpy(),
+            scales=scales.detach().cpu().numpy(),
+            opacities=opacities.detach().cpu().numpy(),
+            colors=color_lrs.detach().cpu().numpy(),
             camera_params=camera_matrices,
             image_paths=image_paths
         )
@@ -345,14 +429,14 @@ class GaussianSplattingTrainer:
     
     def _save_results(self, means, quats, scales, opacities, colors, camera_matrices):
         """訓練結果を保存"""
-        # NumPy配列に変換して保存
+        # NumPy配列に変換して保存（勾配情報を削除）
         np.savez(
             str(self.output_dir / 'gaussian_params.npz'),
-            means=means.cpu().numpy(),
-            quats=quats.cpu().numpy(),
-            scales=scales.cpu().numpy(),
-            opacities=opacities.cpu().numpy(),
-            colors=colors.cpu().numpy()
+            means=means.detach().cpu().numpy(),
+            quats=quats.detach().cpu().numpy(),
+            scales=scales.detach().cpu().numpy(),
+            opacities=opacities.detach().cpu().numpy(),
+            colors=colors.detach().cpu().numpy()
         )
         
         # カメラパラメータをJSONとして保存

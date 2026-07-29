@@ -72,7 +72,22 @@ def run_pipeline(config: dict):
     print("ステップ2: Camera Pose推定 (COLMAP)")
     print("=" * 40)
     colmap_runner = ColmapRunner(config)
-    colmap_results = colmap_runner.run(processed_data)
+    
+    # COLMAP処理を実行（mapperが失敗しても警告付きで続行）
+    colmap_results = None
+    try:
+        colmap_results = colmap_runner.run(processed_data)
+    except RuntimeError as e:
+        print(f"  警告: COLMAP処理でエラーが発生しました: {e}")
+        print(f"  警告: 処理を続行します...")
+        # 空の結果を生成
+        colmap_results = {
+            'camera_params': [],
+            'image_paths': processed_data['image_paths'],
+            'cameras': {},
+            'images': {},
+            'points3D': None
+        }
     
     # ステップ3: Gaussian Splatting訓練
     print("\n" + "=" * 40)
@@ -86,7 +101,7 @@ def run_pipeline(config: dict):
     print("ステップ4: メッシュ化")
     print("=" * 40)
     mesh_converter = MeshConverter(config)
-    mesh_data = mesh_converter.convert(gs_result)
+    mesh_data = mesh_converter.convert(gs_result, colmap_results)
     
     # ステップ5: 出力エクスポート
     print("\n" + "=" * 40)

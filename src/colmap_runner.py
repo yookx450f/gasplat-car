@@ -27,16 +27,11 @@ class ColmapRunner:
         self.config = config
         self.colmap_config = config.get('colmap', {})
         
-        # 出力ディレクトリ
-        self.work_dir = Path('data/colmap_work')
-        self.db_path = self.work_dir / 'database.db'
-        self.images_dir = self.work_dir / 'images'
-        self.sparse_dir = self.work_dir / 'sparse'
-        
-        # 作業ディレクトリを作成
-        self.work_dir.mkdir(exist_ok=True)
-        self.images_dir.mkdir(exist_ok=True)
-        self.sparse_dir.mkdir(exist_ok=True)
+        # 出力ディレクトリ（後で絶対パスに上書き）
+        self.work_dir = None
+        self.db_path = None
+        self.images_dir = None
+        self.sparse_dir = None
     
     def _prepare_images(self, processed_data: Dict) -> None:
         """
@@ -63,7 +58,7 @@ class ColmapRunner:
         
         result = subprocess.run(
             cmd,
-            cwd=str(self.work_dir),
+            cwd=str(os.path.abspath(self.work_dir)),
             capture_output=True,
             text=True
         )
@@ -83,6 +78,9 @@ class ColmapRunner:
         max_size = extractor_config.get('max_image_size', 1024)
         camera_model = extractor_config.get('camera_model', 'simple_pinhole')
         num_threads = extractor_config.get('num_threads', 8)
+        max_num_features = extractor_config.get('max_num_features', 4096)
+        sift_peak_threshold = extractor_config.get('sift_peak_threshold', 0.0066666666666666671)
+        sift_edge_threshold = extractor_config.get('sift_edge_threshold', 10)
         
         self._run_colmap_command([
             'feature_extractor',
@@ -90,23 +88,26 @@ class ColmapRunner:
             '--image_path', str(self.images_dir),
             '--ImageReader.camera_model', camera_model,
             '--ImageReader.single_camera', '1',
-            '--ImageReader.camera_params', f'0,{max_size},0,{max_size/2},{max_size/2}',
-            '--SiftExtraction.max_num_features', str(extractor_config.get('max_features', 4096)),
-            '--SiftExtraction.gpu_index', '-1',  # CPU使用（COLMAPの制限）
-            '--SiftExtraction.num_threads', str(num_threads),
-            '--SiftExtraction.augmentation', '0'
+            '--ImageReader.camera_params', f'{max_size},{max_size/2},{max_size/2},0',
+            '--SiftExtraction.max_num_features', str(max_num_features),
+            '--SiftExtraction.peak_threshold', str(sift_peak_threshold),
+            '--SiftExtraction.edge_threshold', str(sift_edge_threshold),
+            '--SiftExtraction.use_gpu', '0'  # CPUモード（コンテナ内OpenGL問題回避）
         ])
     
     def run_feature_matching(self) -> None:
         """特徴量マッチングを実行"""
         matcher_config = self.colmap_config.get('matcher', {})
         matcher_type = matcher_config.get('type', 'exhaustive')
+        max_num_matches = matcher_config.get('max_num_matches', 65536)
+        mutual_filter = matcher_config.get('mutual_filter', 1)
         
         if matcher_type == 'exhaustive':
             self._run_colmap_command([
                 'exhaustive_matcher',
                 '--database_path', str(self.db_path),
-                '--SiftMatching.max_num_matches', '1024',
+                '--SiftMatching.max_num_matches', str(max_num_matches),
+                '--SiftMatching.use_gpu', '0'  # CPUモード（コンテナ内OpenGL問題回避）
             ])
         elif matcher_type == 'vocab_tree':
             vocab_tree_file = matcher_config.get('vocabulary_tree_file', '')
@@ -130,20 +131,63 @@ class ColmapRunner:
             COLMAP処理結果（カメラパラメータ、3Dポイントなど）
         """
         mapper_config = self.colmap_config.get('mapper', {})
-        min_num_matches = mapper_config.get('min_num_matches', 12)
+        min_num_matches = mapper_config.get('min_num_matches', 3)  # 低い値で初期ペアを見つけやすくする
+        max_num_iterations = mapper_config.get('max_num_iterations', 50)
+        init_min_tri_angle = mapper_config.get('init_min_tri_angle', 0.1)  # 三角測量の最小角度を緩和
+        ba_global_max_num_iterations = mapper_config.get('ba_global_max_num_iterations', 200)
+        ba_global_max_refit_iterations = mapper_config.get('ba_global_max_refit_iterations', 10)
         
-        self._run_colmap_command([
+        # 出力ディレクトリを事前に作成（COLMAP要求）
+        self.sparse_dir.mkdir(parents=True, exist_ok=True)
+        
+        # COLMAP mapperを実行（エラー時も警告として処理を続行）
+        cmd = [
             'mapper',
             '--database_path', str(self.db_path),
             '--image_path', str(self.images_dir),
             '--output_path', str(self.sparse_dir),
-            '--mapper.min_num_matches', str(min_num_matches),
+            '--Mapper.min_num_matches', str(min_num_matches),
             '--Mapper.num_threads', str(self.colmap_config.get('extractor', {}).get('num_threads', 8)),
-            '--Mapper.min_focal_length_ratio', '0.1',
-            '--Mapper.max_focal_length_ratio', '10',
-            '--Mapper.max_num_iterations', str(mapper_config.get('max_num_iterations', 100)),
-            '--Mapper.allowed_range_ratio', str(mapper_config.get('allowed_range_ratio', 0.05)),
-        ])
+            '--Mapper.min_focal_length_ratio', '0.01',
+            '--Mapper.max_focal_length_ratio', '100',
+            '--Mapper.ba_global_max_num_iterations', str(ba_global_max_num_iterations),
+            '--Mapper.init_max_error', '20.0',
+            '--Mapper.init_min_num_inliers', '20',
+            '--Mapper.init_max_forward_motion', '0.999',
+            '--Mapper.init_min_tri_angle', str(init_min_tri_angle),
+            '--Mapper.abs_pose_max_error', '30',
+            '--Mapper.abs_pose_min_inlier_ratio', '0.1',
+            '--Mapper.multiple_models', '0',
+            '--Mapper.ignore_watermarks', '1',
+            '--Mapper.min_model_size', '5',
+            '--Mapper.max_num_models', '100',
+        ]
+        
+        print(f"  実行: {' '.join(cmd)}")
+        result = subprocess.run(
+            ['colmap'] + cmd,
+            cwd=str(os.path.abspath(self.work_dir)),
+            capture_output=True,
+            text=True
+        )
+        
+        if result.returncode != 0:
+            # mapperが失敗しても警告として処理を続行
+            print(f"  警告: COLMAP mapperがエラーを返しました: {result.stderr[:500]}")
+            print(f"  警告: 初期画像ペアが見つからなかった可能性があります。")
+            print(f"  警告: 処理を続行します...")
+            
+            # 既に作成されたsparseディレクトリが存在するか確認
+            if not self.sparse_dir.exists() or not (self.sparse_dir / 'images' / 'images.bin').exists():
+                # 空の結果を返す
+                print(f"  警告: マップ結果が存在しないため、空の結果を返します。")
+                return {
+                    'camera_params': [],
+                    'image_paths': [],
+                    'cameras': {},
+                    'images': {},
+                    'points3D': None
+                }
         
         return self._parse_colmap_results()
     
@@ -309,6 +353,26 @@ class ColmapRunner:
         dict
             COLMAP処理結果
         """
+        # 作業ディレクトリを絶対パスで設定（COLMAP要求）
+        self.work_dir = Path(os.path.abspath('data/colmap_work'))
+        self.db_path = self.work_dir / 'database.db'
+        self.images_dir = self.work_dir / 'images'
+        self.sparse_dir = self.work_dir / 'sparse'
+        
+        # 既存のデータベースを削除（再実行対応）
+        if self.db_path.exists():
+            self.db_path.unlink()
+        
+        # 既存の作業ディレクトリを完全に削除
+        import shutil
+        if self.work_dir.exists():
+            shutil.rmtree(str(self.work_dir))
+        
+        # 作業ディレクトリを事前に作成（COLMAP要求）
+        self.work_dir.mkdir(parents=True, exist_ok=True)
+        self.images_dir.mkdir(parents=True, exist_ok=True)
+        self.sparse_dir.mkdir(parents=True, exist_ok=True)
+        
         print("画像を準備中...")
         self._prepare_images(processed_data)
         

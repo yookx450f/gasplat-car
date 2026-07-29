@@ -1,5 +1,10 @@
 # gasplat-car 設定ファイル
 
+# データディレクトリ
+data:
+  # COLMAP作業ディレクトリ
+  colmap_work_dir: "data/colmap_work"
+
 # 入力画像の設定
 input:
   # 入力画像のディレクトリ（data/input内）
@@ -7,7 +12,7 @@ input:
   # 画像数（8枚を想定）
   num_images: 8
   # 画像のリサイズ解像度（最大の辺の長さ）
-  max_image_size: 1024
+  max_image_size: 2048
 
 # Gaussian Splatting 訓練パラメータ
 training:
@@ -35,20 +40,29 @@ preprocessing:
 colmap:
   # Feature Extractor
   extractor:
-    camera_model: "simple_pinhole"  # simple_pinhole, pinhole, simple_radial
+    camera_model: "SIMPLE_RADIAL"  # COLMAP 3.7+ではSIMPLE_RADIALのみ
     max_image_size: 1024
     num_threads: 8
+    # 最大特徴点数
+    max_num_features: 4096
+    # SIFT閾値（デフォルト値を使用）
+    sift_peak_threshold: 0.0066666666666666671
+    sift_edge_threshold: 10
   
   # Feature Matcher
   matcher:
     type: "exhaustive"  # exhaustive, vocabulary_tree
     vocabulary_tree_file: ""  # 指定しない場合はexhaustiveモード
+    # 最大マッチ数
+    max_num_matches: 8192
   
   # Bundle Adjustment
   mapper:
-    min_num_matches: 12
+    min_num_matches: 6
     max_num_iterations: 100
     allowed_range_ratio: 0.05
+    init_min_tri_angle: 1.0
+    ba_global_max_num_iterations: 200
 
 # メッシュ化パラメータ
 meshing:
