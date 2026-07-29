@@ -177,8 +177,14 @@ class ColmapRunner:
             print(f"  警告: 初期画像ペアが見つからなかった可能性があります。")
             print(f"  警告: 処理を続行します...")
             
-            # 既に作成されたsparseディレクトリが存在するか確認
-            if not self.sparse_dir.exists() or not (self.sparse_dir / 'images' / 'images.bin').exists():
+            # 既に作成されたsparseディレクトリが存在するか確認（COLMAP 3.7+対応）
+            found_images = False
+            for images_path in [self.sparse_dir / '0' / 'images.bin', self.sparse_dir / '0' / 'images' / 'images.bin', self.sparse_dir / 'images' / 'images.bin']:
+                if images_path.exists():
+                    found_images = True
+                    break
+            
+            if not self.sparse_dir.exists() or not found_images:
                 # 空の結果を返す
                 print(f"  警告: マップ結果が存在しないため、空の結果を返します。")
                 return {
@@ -191,18 +197,49 @@ class ColmapRunner:
         
         return self._parse_colmap_results()
     
+    def _ensure_text_format(self) -> Path:
+        """sparse/0/のバイナリをsparse/text/にテキスト変換して返す"""
+        text_dir = self.sparse_dir / 'text'
+        if not text_dir.exists() or not any(text_dir.iterdir()):
+            text_dir.mkdir(parents=True, exist_ok=True)
+            
+            # COLMAP 3.7+ではバイナリファイルが存在するか確認
+            binary_cameras = self.sparse_dir / '0' / 'cameras.bin'
+            binary_images = self.sparse_dir / '0' / 'images.bin'
+            binary_points = self.sparse_dir / '0' / 'points3D.bin'
+            
+            if binary_cameras.exists() and binary_images.exists() and binary_points.exists():
+                # バイナリからテキストに変換
+                self._run_colmap_command([
+                    'model_converter',
+                    '--input_path', str(self.sparse_dir / '0'),
+                    '--output_path', str(text_dir),
+                    '--output_type', 'txt'
+                ])
+            else:
+                # 既にtext形式が存在する可能性があるので、sparse/0/text/も確認
+                alt_text_dir = self.sparse_dir / '0' / 'text'
+                if alt_text_dir.exists() and any(alt_text_dir.iterdir()):
+                    # 既存のtextファイルを現在のtextディレクトリにコピー
+                    for file in alt_text_dir.glob('*'):
+                        shutil.copy2(str(file), str(text_dir / file.name))
+                else:
+                    # text形式が存在しない場合はバイナリファイルから直接読み込む
+                    print("  警告: テキスト形式の変換ができません。バイナリ形式で読み込みます。")
+                    return None
+        
+        return text_dir
+    
     def _parse_colmap_results(self) -> Dict:
         """
-        COLMAPの処理結果をパース
+        COLMAPの処理結果をパース（テキスト形式を使用、バイナリにフォールバック）
         
         Returns
         -------
         dict
             カメラパラメータ、3Dポイント雲などのデータ
         """
-        cameras_json = self.sparse_dir / 'cameras' / 'cameras.bin'
-        images_json = self.sparse_dir / 'images' / 'images.bin'
-        points_json = self.sparse_dir / 'points3D' / 'points3D.bin'
+        text_dir = self._ensure_text_format()
         
         result = {
             'camera_params': [],
@@ -212,19 +249,259 @@ class ColmapRunner:
             'points3D': None
         }
         
-        # cameras.binの読み込み
-        if cameras_json.exists():
-            result['cameras'] = self._read_cameras_binary(str(cameras_json))
-        
-        # images.binの読み込み（カメラ行列と位置を取得）
-        if images_json.exists():
-            result['images'] = self._read_images_binary(str(images_json))
-        
-        # points3D.binの読み込み
-        if points_json.exists():
-            result['points3D'] = self._read_points3d_binary(str(points_json))
+        if text_dir is not None:
+            # テキスト形式で読み込み
+            cameras_txt = text_dir / 'cameras.txt'
+            images_txt = text_dir / 'images.txt'
+            points3D_txt = text_dir / 'points3D.txt'
+            
+            if cameras_txt.exists():
+                result['cameras'] = self._read_cameras_text(str(cameras_txt))
+            if images_txt.exists():
+                result['images'] = self._read_images_text(str(images_txt))
+            if points3D_txt.exists():
+                result['points3D'] = self._read_points3d_text(str(points3D_txt))
+        else:
+            # バイナリ形式にフォールバック
+            print("  警告: テキスト形式が利用できないため、バイナリ形式で読み込みます。")
+            
+            # COLMAP 3.7+のバイナリパス
+            binary_cameras = self.sparse_dir / '0' / 'cameras.bin'
+            binary_images = self.sparse_dir / '0' / 'images.bin'
+            binary_points = self.sparse_dir / '0' / 'points3D.bin'
+            
+            # 古いバイナリパスも確認
+            if not binary_cameras.exists():
+                binary_cameras = self.sparse_dir / 'cameras.bin'
+            if not binary_images.exists():
+                binary_images = self.sparse_dir / 'images.bin'
+            if not binary_points.exists():
+                binary_points = self.sparse_dir / 'points3D.bin'
+            
+            if binary_cameras.exists():
+                result['cameras'] = self._read_cameras_binary(str(binary_cameras))
+            if binary_images.exists():
+                result['images'] = self._read_images_binary(str(binary_images))
+            if binary_points.exists():
+                result['points3D'] = self._read_points3d_binary(str(binary_points))
         
         return result
+    
+    def _read_cameras_text(self, filepath: str) -> Dict:
+        """cameras.txtを読み込み"""
+        cameras = {}
+        with open(filepath, 'r') as f:
+            lines = f.readlines()
+        
+        i = 0
+        while i < len(lines):
+            line = lines[i].strip()
+            # コメント行または空行をスキップ
+            if not line or line.startswith('#'):
+                i += 1
+                continue
+            
+            # カメラデータのパース
+            parts = line.split()
+            if len(parts) >= 7:
+                camera_id = int(parts[0])
+                model = parts[1]
+                width = int(parts[2])
+                height = int(parts[3])
+                
+                # パラメータ数モデルによって異なる
+                if model == 'SIMPLE_PINHOLE':
+                    focal_length = float(parts[4])
+                    cx, cy = float(parts[5]), float(parts[6])
+                    params_dict = {
+                        'model': 'simple_pinhole',
+                        'width': width,
+                        'height': height,
+                        'fx': focal_length,
+                        'fy': focal_length,
+                        'cx': cx,
+                        'cy': cy
+                    }
+                elif model == 'PINHOLE':
+                    fx, fy, cx, cy = float(parts[4]), float(parts[5]), float(parts[6]), float(parts[7])
+                    params_dict = {
+                        'model': 'pinhole',
+                        'width': width,
+                        'height': height,
+                        'fx': fx,
+                        'fy': fy,
+                        'cx': cx,
+                        'cy': cy
+                    }
+                elif model == 'SIMPLE_RADIAL':
+                    focal_length = float(parts[4])
+                    cx, cy = float(parts[5]), float(parts[6])
+                    k = float(parts[7])
+                    params_dict = {
+                        'model': 'simple_radial',
+                        'width': width,
+                        'height': height,
+                        'fx': focal_length,
+                        'fy': focal_length,
+                        'cx': cx,
+                        'cy': cy,
+                        'k': k
+                    }
+                elif model == 'RADIAL':
+                    focal_length = float(parts[4])
+                    cx, cy = float(parts[5]), float(parts[6])
+                    k1, k2 = float(parts[7]), float(parts[8])
+                    params_dict = {
+                        'model': 'radial',
+                        'width': width,
+                        'height': height,
+                        'fx': focal_length,
+                        'fy': focal_length,
+                        'cx': cx,
+                        'cy': cy,
+                        'k1': k1,
+                        'k2': k2
+                    }
+                elif model == 'OPENCV':
+                    fx, fy, cx, cy = float(parts[4]), float(parts[5]), float(parts[6]), float(parts[7])
+                    k1, k2, p1, p2 = float(parts[8]), float(parts[9]), float(parts[10]), float(parts[11])
+                    params_dict = {
+                        'model': 'opencv',
+                        'width': width,
+                        'height': height,
+                        'fx': fx,
+                        'fy': fy,
+                        'cx': cx,
+                        'cy': cy,
+                        'k1': k1, 'k2': k2, 'p1': p1, 'p2': p2
+                    }
+                elif model == 'OPENCV_FISHEYE':
+                    fx, fy, cx, cy = float(parts[4]), float(parts[5]), float(parts[6]), float(parts[7])
+                    k1, k2, k3, k4 = float(parts[8]), float(parts[9]), float(parts[10]), float(parts[11])
+                    params_dict = {
+                        'model': 'opencv_fisheye',
+                        'width': width,
+                        'height': height,
+                        'fx': fx,
+                        'fy': fy,
+                        'cx': cx,
+                        'cy': cy,
+                        'k1': k1, 'k2': k2, 'k3': k3, 'k4': k4
+                    }
+                else:
+                    # その他のモデルはパラメータとして保存
+                    num_params = len(parts) - 4
+                    params = [float(p) for p in parts[4:]]
+                    params_dict = {
+                        'model': model.lower(),
+                        'width': width,
+                        'height': height,
+                        'params': params
+                    }
+                
+                cameras[camera_id] = params_dict
+            
+            i += 1
+        
+        return cameras
+    
+    def _read_images_text(self, filepath: str) -> Dict:
+        """images.txtを読み込み（カメラ行列と位置）"""
+        images = {}
+        with open(filepath, 'r') as f:
+            lines = f.readlines()
+        
+        i = 0
+        while i < len(lines):
+            line = lines[i].strip()
+            # コメント行または空行をスキップ
+            if not line or line.startswith('#'):
+                i += 1
+                continue
+            
+            # イメージデータのパース
+            # テキスト形式: R行列(3行) + t + image_name + camera_id
+            # 最初の行: [R11 R12 R13 t1] または [qiw qx qy qz] t1
+            parts = line.split()
+            
+            if len(parts) == 4:
+                # クォータニオン形式: qiw qx qy qz tx ty tz image_name camera_id
+                qw = float(parts[0])
+                qx = float(parts[1])
+                qy = float(parts[2])
+                qz = float(parts[3])
+                
+                # 次の行からtとimage_nameを読み込む
+                i += 1
+                t_parts = lines[i].strip().split()
+                tx, ty, tz = float(t_parts[0]), float(t_parts[1]), float(t_parts[2])
+                
+                i += 1
+                image_name = lines[i].strip()
+                
+                i += 1
+                camera_id = int(lines[i].strip())
+            else:
+                # ロdriguesベクトル形式（簡易処理）
+                i += 1
+                if i >= len(lines):
+                    break
+                t_parts = lines[i].strip().split()
+                tx, ty, tz = float(t_parts[0]), float(t_parts[1]), float(t_parts[2])
+                
+                i += 1
+                image_name = lines[i].strip()
+                
+                i += 1
+                camera_id = int(lines[i].strip())
+                
+                # ロdriguesベクトルからクォータニオンに変換（簡易版）
+                qw, qx, qy, qz = 1.0, 0.0, 0.0, 0.0
+            
+            # クォータニオンから回転行列を生成
+            R = self._quaternion_to_rotation_matrix(qx, qy, qz, qw)
+            t = np.array([tx, ty, tz])
+            
+            # カメラ座標系に変換: R^T, -R^T*t
+            RT = R.T
+            cam_R = RT
+            cam_t = -RT @ t
+            
+            images[camera_id] = {
+                'name': image_name,
+                'rotation': cam_R,
+                'translation': cam_t,
+                'qw': qw, 'qx': qx, 'qy': qy, 'qz': qz,
+                'tx': tx, 'ty': ty, 'tz': tz
+            }
+            
+            i += 1
+        
+        return images
+    
+    def _read_points3d_text(self, filepath: str) -> np.ndarray:
+        """points3D.txtを読み込み"""
+        points3D = []
+        with open(filepath, 'r') as f:
+            lines = f.readlines()
+        
+        for line in lines:
+            line = line.strip()
+            # コメント行または空行をスキップ
+            if not line or line.startswith('#'):
+                continue
+            
+            parts = line.split()
+            if len(parts) >= 14:
+                point_id = int(parts[0])
+                x, y, z = float(parts[1]), float(parts[2]), float(parts[3])
+                r, g, b = int(parts[4]), int(parts[5]), int(parts[6])
+                error = float(parts[7])
+                
+                # 観測された画像のリスト（残りは省略）
+                points3D.append([x, y, z, r, g, b])
+        
+        return np.array(points3D) if points3D else np.empty((0, 6))
     
     def _read_cameras_binary(self, filepath: str) -> Dict:
         """cameras.binを読み込み"""
