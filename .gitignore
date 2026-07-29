@@ -12,6 +12,8 @@ output/car_model.glb
 output/car_model.obj
 output/mesh/mesh.ply
 output/ip
+output/glb/
+src/convert_ply_to_glb.py
 
 # Data files (binary)
 data/colmap_work/database.db
