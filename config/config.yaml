@@ -97,6 +97,23 @@ masking:
   # rembg エンジン (u2net, u2netp, u2net_humans, etc.)
   rembg_engine: "u2net"
 
+# パーツ別セグメンテーション（フェーズ1 ステップ2）
+part_segmentation:
+  # 有効化
+  enabled: true
+  # 入力画像ディレクトリ（ステップ1の背景透過画像）
+  part_masks_input_dir: "data/2masked_images"
+  # 出力ディレクトリ
+  part_masks_output_dir: "data/3part_masks"
+  # SAM2使用の有無（Falseの場合はヒューリスティック処理）
+  use_sam2: false
+  # サポートされるパーツ
+  parts:
+    glass: "窓ガラス"
+    wheels: "ホイール"
+    body: "ボディ"
+    other: "その他（ライト・グリル等）"
+
 # 中間結果出力設定
 intermediate_output:
   # 出力の有効化
