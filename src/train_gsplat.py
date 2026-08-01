@@ -393,7 +393,14 @@ class GaussianSplattingTrainer:
                     print("  エラー: カメラ行列が空のため訓練できません。COLMAP結果を確認してください。")
                 break
             
-            cam = camera_matrices[img_idx]
+            # camera_matricesが画像数より少ない場合はフォールバックを使用
+            if img_idx >= len(camera_matrices):
+                # 最後のカメラを再利用
+                cam = camera_matrices[-1]
+                if i == 0:
+                    print(f"  警告: カメラ数が不足しています ({len(camera_matrices)} < {num_images})。フォールバックカメラを使用します。")
+            else:
+                cam = camera_matrices[img_idx]
             
             K = cam['K']
             viewmat = cam['RT']
@@ -474,7 +481,10 @@ class GaussianSplattingTrainer:
                     alpha_mean = alpha_min = alpha_max = -1
                 
                 # カメラ座標系でのガウシアン位置を確認
-                cam = camera_matrices[img_idx]
+                if img_idx < len(camera_matrices):
+                    cam = camera_matrices[img_idx]
+                else:
+                    cam = camera_matrices[-1]
                 RT = cam['RT']
                 # ガウシアンの一部をカメラ座標に変換（最初の10個のみ）
                 num_debug = min(10, means_3d.shape[0])

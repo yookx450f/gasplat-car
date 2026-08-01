@@ -1,0 +1,66 @@
+ Image docker-gsplat-car Building 
+#1 [internal] load local bake definitions
+#1 reading from stdin 553B done
+#1 DONE 0.0s
+
+#2 [internal] load build definition from Dockerfile
+#2 transferring dockerfile: 902B done
+#2 DONE 0.0s
+
+#3 [internal] load metadata for docker.io/pytorch/pytorch:2.1.0-cuda12.1-cudnn8-devel
+#3 DONE 0.3s
+
+#4 [internal] load .dockerignore
+#4 transferring context: 2B done
+#4 DONE 0.0s
+
+#5 [1/4] FROM docker.io/pytorch/pytorch:2.1.0-cuda12.1-cudnn8-devel@sha256:fe174e1e257d29976c99ebe9832d9bb20bd9706ea8eff1482cc9af261998c48d
+#5 resolve docker.io/pytorch/pytorch:2.1.0-cuda12.1-cudnn8-devel@sha256:fe174e1e257d29976c99ebe9832d9bb20bd9706ea8eff1482cc9af261998c48d 0.0s done
+#5 DONE 0.0s
+
+#6 [2/4] RUN apt-get update && apt-get install -y     wget     git     cmake     colmap     libgl1-mesa-glx     libglib2.0-0     libx11-6     libglu1-mesa     && rm -rf /var/lib/apt/lists/*
+#6 CACHED
+
+#7 [3/4] RUN pip install --no-cache-dir     "numpy<2.0"     opencv-python-headless     trimesh     pyyaml     configargparse     Pillow     packaging     scipy     gsplat     open3d
+#7 CACHED
+
+#8 [4/4] WORKDIR /workspace
+#8 CACHED
+
+#9 exporting to image
+#9 exporting layers done
+#9 exporting manifest sha256:6a43e79ae58fc222bbf9e6e612949255fb7af7ecd72e8d900bd2d492d9228111 done
+#9 exporting config sha256:04d997e0d7c1ba9169e014e617e2dfac7e5d7206dbf8d6fdfc22410d0dff6210 done
+#9 exporting attestation manifest sha256:eda67dc6529e4cfe17479dcde473fcfbc05e594ef78b4a4a530253eca7a5c9d7 0.0s done
+#9 exporting manifest list sha256:dfcac1963b6a6994f0b37754b7e663622e6265d54da332328c6435eaa691832e
+#9 exporting manifest list sha256:dfcac1963b6a6994f0b37754b7e663622e6265d54da332328c6435eaa691832e 0.0s done
+#9 naming to docker.io/library/docker-gsplat-car:latest done
+#9 unpacking to docker.io/library/docker-gsplat-car:latest 0.0s done
+#9 DONE 0.1s
+
+#10 resolving provenance for metadata file
+#10 DONE 0.0s
+ Image docker-gsplat-car Built 
+ Network docker_default Creating 
+ Network docker_default Created 
+ Container gsplat-car Creating 
+ Container gsplat-car Created 
+Attaching to gsplat-car
+ Container gsplat-car Starting 
+gsplat-car  | 
+gsplat-car  | ==========
+gsplat-car  | == CUDA ==
+gsplat-car  | ==========
+gsplat-car  | 
+gsplat-car  | CUDA Version 12.1.1
+gsplat-car  | 
+gsplat-car  | Container image Copyright (c) 2016-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+gsplat-car  | 
+gsplat-car  | This container image and its contents are governed by the NVIDIA Deep Learning Container License.
+gsplat-car  | By pulling and using the container, you accept the terms and conditions of this license:
+gsplat-car  | https://developer.nvidia.com/ngc/nvidia-deep-learning-container-license
+gsplat-car  | 
+gsplat-car  | A copy of this license is made available in this container at /NGC-DL-CONTAINER-LICENSE for your convenience.
+ Container gsplat-car Started 
+gsplat-car  | 
+[Kgsplat-car exited with code 0

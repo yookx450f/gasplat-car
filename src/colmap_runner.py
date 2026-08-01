@@ -82,13 +82,24 @@ class ColmapRunner:
         sift_peak_threshold = extractor_config.get('sift_peak_threshold', 0.0066666666666666671)
         sift_edge_threshold = extractor_config.get('sift_edge_threshold', 10)
         
+        # SIMPLE_RADIAL: focal_length, cx, cy, k
+        # 画像サイズに合わせた適切なカメラパラメータを設定
+        # 焦点距離は画像の最大辺の長さの1.5倍程度（一般的なレンズ相当）
+        focal = float(max_size) * 1.5  # 焦点距離
+        cx = float(max_size) / 2.0     # 主点X
+        cy = float(max_size) / 2.0     # 主点Y
+        k = 0.0                         # 歪み係数（後で最適化）
+        
+        camera_params_str = f'{focal},{cx},{cy},{k}'
+        
         self._run_colmap_command([
             'feature_extractor',
             '--database_path', str(self.db_path),
             '--image_path', str(self.images_dir),
             '--ImageReader.camera_model', camera_model,
             '--ImageReader.single_camera', '1',
-            '--ImageReader.camera_params', f'{max_size},{max_size/2},{max_size/2},0',
+            '--ImageReader.camera_params', camera_params_str,
+            '--ImageReader.default_focal_length_factor', '1.2',
             '--SiftExtraction.max_num_features', str(max_num_features),
             '--SiftExtraction.peak_threshold', str(sift_peak_threshold),
             '--SiftExtraction.edge_threshold', str(sift_edge_threshold),
@@ -141,25 +152,26 @@ class ColmapRunner:
         self.sparse_dir.mkdir(parents=True, exist_ok=True)
         
         # COLMAP mapperを実行（エラー時も警告として処理を続行）
+        # COLMAP 3.6 のデフォルト値を調整して、少ない画像数でも動作するようにする
         cmd = [
             'mapper',
             '--database_path', str(self.db_path),
             '--image_path', str(self.images_dir),
             '--output_path', str(self.sparse_dir),
-            '--Mapper.min_num_matches', str(min_num_matches),
+            '--Mapper.min_num_matches', '1',  # マッチ数が少ない場合でも動作するように
             '--Mapper.num_threads', str(self.colmap_config.get('extractor', {}).get('num_threads', 8)),
             '--Mapper.min_focal_length_ratio', '0.01',
             '--Mapper.max_focal_length_ratio', '100',
             '--Mapper.ba_global_max_num_iterations', str(ba_global_max_num_iterations),
-            '--Mapper.init_max_error', '20.0',
-            '--Mapper.init_min_num_inliers', '20',
+            '--Mapper.init_max_error', '5.0',  # 許容誤差を緩和
+            '--Mapper.init_min_num_inliers', '5',  # 最小インライア数を下げる
             '--Mapper.init_max_forward_motion', '0.999',
-            '--Mapper.init_min_tri_angle', str(init_min_tri_angle),
-            '--Mapper.abs_pose_max_error', '30',
-            '--Mapper.abs_pose_min_inlier_ratio', '0.1',
+            '--Mapper.init_min_tri_angle', '1.0',
+            '--Mapper.init_max_reg_trials', '10',  # 登録試行回数を増やす
+            '--Mapper.ba_global_use_pba', '0',  # PBAを使わない（CUDAなし対応）
             '--Mapper.multiple_models', '0',
             '--Mapper.ignore_watermarks', '1',
-            '--Mapper.min_model_size', '5',
+            '--Mapper.min_model_size', '2',  # 最小モデルサイズを下げる
             '--Mapper.max_num_models', '100',
         ]
         
@@ -420,12 +432,27 @@ class ColmapRunner:
                 continue
             
             # イメージデータのパース
-            # テキスト形式: R行列(3行) + t + image_name + camera_id
-            # 最初の行: [R11 R12 R13 t1] または [qiw qx qy qz] t1
+            # COLMAP 3.7+ フォーマット: IMAGE_ID, QW, QX, QY, QZ, TX, TY, TZ, CAMERA_ID, NAME
+            # または 古いフォーマット: qiw qx qy qz (行1), tx ty tz (行2), image_name (行3), camera_id (行4)
             parts = line.split()
             
-            if len(parts) == 4:
-                # クォータニオン形式: qiw qx qy qz tx ty tz image_name camera_id
+            if len(parts) >= 10:
+                # COLMAP 3.7+ フォーマット: IMAGE_ID, QW, QX, QY, QZ, TX, TY, TZ, CAMERA_ID, NAME
+                image_id = int(parts[0])
+                qw = float(parts[1])
+                qx = float(parts[2])
+                qy = float(parts[3])
+                qz = float(parts[4])
+                tx = float(parts[5])
+                ty = float(parts[6])
+                tz = float(parts[7])
+                camera_id = int(parts[8])
+                image_name = ' '.join(parts[9:])  # ファイル名にスペースが含まれる可能性
+                
+                # 次の行はPOINTS2Dデータなのでスキップ
+                i += 2
+            elif len(parts) == 4:
+                # 古いフォーマット: クォータニオン形式 (qiw qx qy qz)
                 qw = float(parts[0])
                 qx = float(parts[1])
                 qy = float(parts[2])
@@ -433,14 +460,21 @@ class ColmapRunner:
                 
                 # 次の行からtとimage_nameを読み込む
                 i += 1
+                if i >= len(lines):
+                    break
                 t_parts = lines[i].strip().split()
                 tx, ty, tz = float(t_parts[0]), float(t_parts[1]), float(t_parts[2])
                 
                 i += 1
+                if i >= len(lines):
+                    break
                 image_name = lines[i].strip()
                 
                 i += 1
+                if i >= len(lines):
+                    break
                 camera_id = int(lines[i].strip())
+                i += 1
             else:
                 # ロdriguesベクトル形式（簡易処理）
                 i += 1
@@ -450,10 +484,15 @@ class ColmapRunner:
                 tx, ty, tz = float(t_parts[0]), float(t_parts[1]), float(t_parts[2])
                 
                 i += 1
+                if i >= len(lines):
+                    break
                 image_name = lines[i].strip()
                 
                 i += 1
+                if i >= len(lines):
+                    break
                 camera_id = int(lines[i].strip())
+                i += 1
                 
                 # ロdriguesベクトルからクォータニオンに変換（簡易版）
                 qw, qx, qy, qz = 1.0, 0.0, 0.0, 0.0
@@ -474,8 +513,6 @@ class ColmapRunner:
                 'qw': qw, 'qx': qx, 'qy': qy, 'qz': qz,
                 'tx': tx, 'ty': ty, 'tz': tz
             }
-            
-            i += 1
         
         return images
     

@@ -32,16 +32,17 @@ class ImagePreprocessor:
         self.output_dir.mkdir(exist_ok=True)
     
     def _get_image_files(self) -> List[Path]:
-        """入力画像ファイルを取得（ファイル名でソート）"""
+        """入力画像ファイルを取得（ファイル名でソート、重複除去）"""
         extensions = ['*.jpg', '*.jpeg', '*.png', '*.bmp', '*.tiff', '*.tif']
-        image_files = []
+        image_files = set()
         for ext in extensions:
-            image_files.extend(glob.glob(str(self.image_dir / ext)))
-            image_files.extend(glob.glob(str(self.image_dir / ext.upper())))
+            image_files.update(glob.glob(str(self.image_dir / ext)))
+            image_files.update(glob.glob(str(self.image_dir / ext.upper())))
         
         # ファイル名でソート（01.jpg, 02.jpg...の順）
-        image_files.sort()
-        return [Path(f) for f in image_files]
+        sorted_files = sorted(list(image_files))
+        print(f"    [Preprocess] 入力画像 {len(sorted_files)}枚を検出: {[f.split('/')[-1] for f in sorted_files]}")
+        return [Path(f) for f in sorted_files]
     
     def _resize_image(self, img: Image.Image, max_size: int) -> Image.Image:
         """画像をリサイズ（アスペクト比保持）"""
