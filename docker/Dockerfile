@@ -28,7 +28,9 @@ RUN pip install --no-cache-dir \
     packaging \
     scipy \
     gsplat \
-    open3d
+    open3d \
+    rembg[all] \
+    onnxruntime-gpu
 
 # ワークディレクトリの設定
 WORKDIR /workspace

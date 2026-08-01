@@ -22,9 +22,11 @@ services:
       bash -c "
       # __pycache__をクリアして古いバイトコンパイルを削除
       find /workspace/src -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
-      # メインスクリプトを実行
-      python3 -u src/main.py --config config/config.yaml
+      # コンテナを起動したままにする（インタラクティブモード）
+      exec bash
       "
+    stdin_open: true
+    tty: true
     # GPUアクセスを確保
     deploy:
       resources:

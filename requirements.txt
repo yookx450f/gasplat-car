@@ -25,3 +25,6 @@ gsplat>=1.0.0
 # PyTorch（GPU対応）
 torch>=2.0.0
 torchvision>=0.15.0
+
+# 背景透過（rembg）
+rembg[all]>=2.0.0

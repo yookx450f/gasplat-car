@@ -84,6 +84,19 @@ output:
   # ファイル名プレフィックス
   filename_prefix: "car_model"
 
+# 背景透過（フェーズ1 ステップ1）
+masking:
+  # 有効化
+  enabled: true
+  # 入力画像ディレクトリ（生画像）
+  masked_input_dir: "data/1raw_images"
+  # 出力画像ディレクトリ（背景透過画像）
+  masked_output_dir: "data/2masked_images"
+  # 出力形式: transparent(透明PNG) または white(白背景JPEG)
+  masked_output_format: "transparent"
+  # rembg エンジン (u2net, u2netp, u2net_humans, etc.)
+  rembg_engine: "u2net"
+
 # 中間結果出力設定
 intermediate_output:
   # 出力の有効化
